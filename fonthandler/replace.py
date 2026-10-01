@@ -189,10 +189,15 @@ class RealFileOps(FileOps):
     def _assert_pending(self, src: Path, dst: Path) -> None:
         entry = registry.PendingEntry(nt_path(src), nt_path(dst))
         queue = registry.read_pending()
-        if entry not in queue:
+        # Compare with same_rename, not equality: Windows stores the entry with
+        # a leading ``*1`` and a ``!`` on a replacement destination, so an exact
+        # match against the path we passed in would always fail even though the
+        # rename was queued correctly.
+        if not any(registry.same_rename(entry, queued) for queued in queue):
+            found = ", ".join(f"{q.source} -> {q.dest}" for q in queue) or "(空)"
             raise OSError(
-                "MoveFileExW reported success but the pending-rename queue "
-                "does not contain the entry"
+                "MoveFileExW 返回成功，但重启队列里找不到对应条目；"
+                f"期望：{entry.source} -> {entry.dest}；实际：{found}"
             )
 
     def unlink(self, path: Path) -> None:

@@ -15,6 +15,7 @@ the whole pipeline can be exercised in the sandbox without touching HKLM.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -34,6 +35,8 @@ __all__ = [
     "remove_pending",
     "clear_our_pending",
     "list_fonts",
+    "strip_pending_markers",
+    "same_rename",
 ]
 
 PENDING_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager"
@@ -208,7 +211,38 @@ class PendingEntry:
 
     @property
     def is_ours(self) -> bool:
-        return self.source.lower().endswith(OUR_SUFFIX)
+        return strip_pending_markers(self.source).lower().endswith(OUR_SUFFIX)
+
+
+#: Windows tags entries in ``PendingFileRenameOperations`` with a leading
+#: marker: ``*1`` on every entry, and ``!`` on a destination that is to be
+#: replaced (the form produced by ``MOVEFILE_REPLACE_EXISTING``).  These appear
+#: in the queue but are not part of the path, so they have to be stripped before
+#: comparing an entry we built ourselves with one read back from the registry --
+#: otherwise a perfectly good rename looks like it never got queued.
+_PENDING_MARKER = re.compile(r"^[*!\d]+")
+
+
+def strip_pending_markers(path: str) -> str:
+    """Drop the leading ``*1``/``!`` markers from a queued path."""
+    return _PENDING_MARKER.sub("", path or "")
+
+
+def _same_path(a: str, b: str) -> bool:
+    return (
+        strip_pending_markers(a).replace("/", "\\").casefold()
+        == strip_pending_markers(b).replace("/", "\\").casefold()
+    )
+
+
+def same_rename(a: "PendingEntry", b: "PendingEntry") -> bool:
+    """True when two entries request the same source -> destination rename.
+
+    Compares with the Windows markers stripped and case-insensitively, because
+    the same rename is written one way by :func:`MoveFileEx` and another way by
+    this module.
+    """
+    return _same_path(a.source, b.source) and _same_path(a.dest, b.dest)
 
 
 def _normalise_multisz(raw: object) -> list[str]:
@@ -258,10 +292,16 @@ def write_pending(entries: Iterable[PendingEntry], backend: RegistryBackend | No
 
 
 def add_pending(entry: PendingEntry, backend: RegistryBackend | None = None) -> list[PendingEntry]:
-    """Append one rename to the queue (idempotent: skips exact duplicates)."""
+    """Append one rename to the queue (idempotent: skips equivalent duplicates).
+
+    "Equivalent" is marker- and case-insensitive.  ``MoveFileEx`` and this
+    module write the same rename in different spellings, so an exact string
+    comparison would queue every rename twice: once by the kernel (with the
+    ``*1``/``!`` markers) and once by us (without).
+    """
     be = backend or get_backend()
     current = read_pending(be)
-    if entry in current:
+    if any(same_rename(entry, existing) for existing in current):
         return current
     current.append(entry)
     write_pending(current, be)
@@ -270,7 +310,7 @@ def add_pending(entry: PendingEntry, backend: RegistryBackend | None = None) -> 
 
 def remove_pending(entry: PendingEntry, backend: RegistryBackend | None = None) -> list[PendingEntry]:
     be = backend or get_backend()
-    current = [e for e in read_pending(be) if e != entry]
+    current = [e for e in read_pending(be) if not same_rename(e, entry)]
     write_pending(current, be)
     return current
 

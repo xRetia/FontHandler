@@ -478,6 +478,68 @@ def test_write_empty_deletes_value():
           "writing an empty queue left the value behind")
 
 
+@test("registry")
+def test_pending_markers_are_stripped_for_comparison():
+    """Windows writes ``*1`` (and ``*1!`` on a replacement) before the path.
+
+    The markers are not part of the path.  Comparing a queue entry we built
+    ourselves against one Windows wrote has to ignore them, or a rename that
+    was queued perfectly well looks like it never happened.
+
+    Real values observed in ``PendingFileRenameOperations`` on Windows 11::
+
+        *1\\??\\C:\\Windows\\Fonts\\msyi.ttf.new
+        *1!\\??\\C:\\Windows\\Fonts\\msyi.ttf
+    """
+    check_eq(
+        registry.strip_pending_markers(r"*1\??\C:\Windows\Fonts\msyi.ttf.new"),
+        r"\??\C:\Windows\Fonts\msyi.ttf.new",
+        "the *1 marker was not stripped",
+    )
+    check_eq(
+        registry.strip_pending_markers(r"*1!\??\C:\Windows\Fonts\msyi.ttf"),
+        r"\??\C:\Windows\Fonts\msyi.ttf",
+        "the *1! marker was not stripped",
+    )
+
+    ours = registry.PendingEntry(
+        r"\??\C:\Windows\Fonts\msyi.ttf.new", r"\??\C:\Windows\Fonts\msyi.ttf")
+    windows = registry.PendingEntry(
+        r"*1\??\C:\Windows\Fonts\msyi.ttf.new", r"*1!\??\C:\Windows\Fonts\msyi.ttf")
+    check(registry.same_rename(ours, windows),
+          "marker-prefixed entry was not recognised as the same rename")
+    # Case differences must not matter either -- the registry may return the
+    # path with different capitalisation than we passed in.
+    casing = registry.PendingEntry(
+        r"\??\c:\windows\fonts\MSYI.TTF.new", r"\??\c:\windows\fonts\msyi.ttf")
+    check(registry.same_rename(ours, casing), "case difference broke the comparison")
+
+
+@test("registry")
+def test_add_pending_does_not_duplicate_what_windows_already_queued():
+    """MoveFileEx already registered the rename; we must not add it again.
+
+    ``queue_for_reboot`` writes the entry through the kernel, and the engine
+    then also calls :func:`add_pending`.  Without marker-aware comparison that
+    second call appends a plain duplicate, so the reboot queue ends up renaming
+    the same file twice.
+    """
+    be = registry.DictRegistryBackend()
+    be.set_value(registry.PENDING_KEY, registry.PENDING_VALUE,
+                 [r"*1\??\C:\Windows\Fonts\msyi.ttf.new",
+                  r"*1!\??\C:\Windows\Fonts\msyi.ttf"], 7)
+
+    ours = registry.PendingEntry(
+        r"\??\C:\Windows\Fonts\msyi.ttf.new", r"\??\C:\Windows\Fonts\msyi.ttf")
+    registry.add_pending(ours, be)
+
+    entries = registry.read_pending(be)
+    check_eq(len(entries), 1,
+             f"the same rename was queued twice: {[e.source for e in entries]}")
+    check(entries[0].source.startswith("*1"),
+          "the kernel-written entry was replaced instead of being recognised")
+
+
 # ---------------------------------------------------------------------------
 # group: replace
 # ---------------------------------------------------------------------------
