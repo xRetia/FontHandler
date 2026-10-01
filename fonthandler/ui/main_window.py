@@ -80,7 +80,8 @@ class AppContext:
 class FontHandlerApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("FontHandler 2.0.0 — GaspHack + 字体替换")
+        self.setWindowTitle(
+            f"{config.APP_NAME} {config.APP_VERSION} — GaspHack + 字体替换")
         self.resize(1280, 840)
 
         self.settings = config.load_settings()
@@ -108,7 +109,7 @@ class FontHandlerApp(QMainWindow):
         """Build the whole window on sandbox backends (no real system paths)."""
         self = cls.__new__(cls)
         QMainWindow.__init__(self)
-        self.setWindowTitle("FontHandler 2.0.0 (test)")
+        self.setWindowTitle(f"{config.APP_NAME} {config.APP_VERSION} (test)")
         self.resize(1024, 700)
         self.settings = settings
         self.security = security

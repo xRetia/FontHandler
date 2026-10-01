@@ -30,6 +30,7 @@ __all__ = [
 ]
 
 APP_NAME = "FontHandler"
+APP_VERSION = "2.0.0"
 
 #: Where a modern per-user Windows install keeps the executable's own data.
 if sys.platform == "win32":
