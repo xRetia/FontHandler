@@ -1,0 +1,16 @@
+# 统一以 LF 提交，避免 Windows 上 CRLF 造成整文件 diff
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.txt text eol=lf
+*.spec text eol=lf
+
+*.png binary
+*.ttf binary
+*.ttc binary
+*.zip binary
+*.exe binary
+*.dll binary
