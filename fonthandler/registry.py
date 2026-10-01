@@ -246,11 +246,22 @@ def same_rename(a: "PendingEntry", b: "PendingEntry") -> bool:
 
 
 def _normalise_multisz(raw: object) -> list[str]:
+    """Split a REG_MULTI_SZ into its strings, preserving empty ones.
+
+    An empty string is meaningful here: a pair whose destination is empty means
+    "delete the source at reboot".  Dropping the empties shifts every following
+    pair, so deletions get read as renames and the queue is silently corrupted
+    the next time it is written back.
+    """
     if raw is None:
         return []
     if isinstance(raw, (list, tuple)):
-        return [str(item) for item in raw if str(item)]
-    return [part for part in str(raw).split("\x00") if part]
+        # winreg hands back the strings already split, with no terminator.
+        return [str(item) for item in raw]
+    parts = str(raw).split("\x00")
+    while parts and parts[-1] == "":
+        parts.pop()
+    return parts
 
 
 def read_pending(backend: RegistryBackend | None = None) -> list[PendingEntry]:

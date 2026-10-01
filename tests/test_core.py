@@ -470,6 +470,53 @@ def test_pending_2_overflow_is_read():
 
 
 @test("registry")
+def test_delete_entries_keep_their_empty_destination():
+    """An empty destination means "delete at reboot"; it must not be dropped.
+
+    Real queues interleave deletes (``source``, ``""``) with renames.  Filtering
+    the empty strings out shifts every following pair, so a delete is read as a
+    rename and a rewrite of the queue corrupts or loses entries.
+    """
+    be = registry.DictRegistryBackend()
+    be.set_value(registry.PENDING_KEY, registry.PENDING_VALUE, [
+        r"*1\??\C:\Windows\apppatch\a.dll", "",
+        r"*1\??\C:\Windows\apppatch\b.dll", "",
+        r"*1\??\C:\Windows\Fonts\msyi.ttf.new", r"*1!\??\C:\Windows\Fonts\msyi.ttf",
+    ], 7)
+
+    entries = registry.read_pending(be)
+
+    check_eq(len(entries), 3, f"delete operations were merged away: {entries}")
+    check_eq(entries[0], registry.PendingEntry(r"*1\??\C:\Windows\apppatch\a.dll", ""),
+             "the first delete was mis-paired")
+    check_eq(entries[1], registry.PendingEntry(r"*1\??\C:\Windows\apppatch\b.dll", ""),
+             "the second delete was mis-paired")
+    check_eq(entries[2].dest, r"*1!\??\C:\Windows\Fonts\msyi.ttf",
+             "the rename after the deletes was mis-paired")
+
+
+@test("registry")
+def test_rewriting_the_queue_preserves_delete_entries():
+    """Round-tripping the queue must not turn deletes into renames.
+
+    ``clear_our_pending`` rewrites the whole value, so a mis-parse here would
+    destroy other software's scheduled deletions.
+    """
+    be = registry.DictRegistryBackend()
+    original = [
+        r"*1\??\C:\Windows\apppatch\a.dll", "",
+        r"\??\C:\Windows\Fonts\msyi.ttf.new", r"\??\C:\Windows\Fonts\msyi.ttf",
+    ]
+    be.set_value(registry.PENDING_KEY, registry.PENDING_VALUE, list(original), 7)
+
+    registry.clear_our_pending(be)
+
+    after = be.get_value(registry.PENDING_KEY, registry.PENDING_VALUE)
+    check_eq(after, [r"*1\??\C:\Windows\apppatch\a.dll", ""],
+             f"the foreign delete entry was corrupted: {after}")
+
+
+@test("registry")
 def test_write_empty_deletes_value():
     be = registry.DictRegistryBackend()
     be.set_value(registry.PENDING_KEY, registry.PENDING_VALUE, [r"\??\C:\a", r"\??\C:\b"], 7)
