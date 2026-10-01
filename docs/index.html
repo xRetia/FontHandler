@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FontHandler — Windows 字体处理工具</title>
+<meta name="description" content="FontHandler 是一款 Windows 字体处理工具，用纯 Python 实现 GaspHack 引擎，并支持系统字体热替换、TrustedInstaller 权限管理与一键还原。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="tag">Windows 字体处理工具</p>
+    <h1>FontHandler</h1>
+    <p class="lead">
+      用纯 Python 重新实现 GaspHack 引擎，替代 <code>ttx.exe</code>、<code>UniteTTC.exe</code>
+      等外部工具链；在此之上提供系统字体热替换、TrustedInstaller 权限托管与完整还原。
+    </p>
+    <div class="actions">
+      <a class="btn primary" href="https://github.com/xRetia/FontHandler/releases">下载</a>
+      <a class="btn" href="https://github.com/xRetia/FontHandler">源代码</a>
+      <a class="btn" href="https://github.com/xRetia/FontHandler#readme">使用文档</a>
+    </div>
+    <p class="meta">免安装单文件 exe · 无需预装 Python · Windows 10/11 x64</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="shot">
+    <img src="images/clean-gasp.png" alt="FontHandler 主界面截图" loading="lazy">
+    <p class="caption">GaspHack 页面：选择字体范围与像素密度行为，右侧实时预览渲染结果</p>
+  </section>
+
+  <section>
+    <h2>解决什么问题</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>中文显示发虚</h3>
+        <p>GaspHack 按字号切换不同的 hinting 与网格拟合参数。原版工具链需要 <code>ttx</code> 加 <code>.ttx</code> 脚本逐个处理，TTC 还要先拆分再重组。FontHandler 把整套逻辑写成纯 Python，TTC 直接原地处理。</p>
+      </div>
+      <div class="card">
+        <h3>改完不生效</h3>
+        <p>系统字体有缓存，热替换需要处理文件锁、所有者与 FontCache 服务。界面提供完整流程：备份 → 替换 → 刷新缓存，不支持的操作自动进重启队列。</p>
+      </div>
+      <div class="card">
+        <h3>改完不敢还原</h3>
+        <p>替换前自动备份原始文件与安全描述符。设成 TrustedInstaller 所有者之后依然可以改回来，不需要手动 <code>takeown</code> 加 <code>icacls</code>。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>五个页面</h2>
+
+    <figure class="shot">
+      <img src="images/gasp.png" alt="GaspHack 页面" loading="lazy">
+      <figcaption>GaspHack —— 选择字体与范围，输出到自己的目录，不动系统字体</figcaption>
+    </figure>
+
+    <figure class="shot">
+      <img src="images/replace.png" alt="替换字体页面" loading="lazy">
+      <figcaption>替换字体 —— 从处理好的目录热替换到系统，权限不足时给出提权入口</figcaption>
+    </figure>
+
+    <figure class="shot">
+      <img src="images/backup.png" alt="备份恢复页面" loading="lazy">
+      <figcaption>备份恢复 —— 按时间列出备份，可整批还原</figcaption>
+    </figure>
+
+    <figure class="shot">
+      <img src="images/acl.png" alt="TrustedInstaller 权限管理页面" loading="lazy">
+      <figcaption>TrustedInstaller —— 把字体所有者交给系统服务，防止被误改</figcaption>
+    </figure>
+
+    <figure class="shot">
+      <img src="images/pending.png" alt="重启队列页面" loading="lazy">
+      <figcaption>重启队列 —— 被占用而无法即时替换的文件在这里排队</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>权限处理</h2>
+    <p>把字体所有者改成 TrustedInstaller 需要三样东西同时成立：</p>
+    <ol>
+      <li><strong>提升的令牌</strong> —— 用 <code>TokenIsElevated</code> 判断</li>
+      <li><strong>开启的特权</strong> —— <code>SeRestorePrivilege</code>、<code>SeTakeOwnershipPrivilege</code>、<code>SeBackupPrivilege</code>、<code>SeSecurityPrivilege</code></li>
+      <li><strong>能写 DACL</strong> —— 前两项特权是前提</li>
+    </ol>
+    <p>界面状态栏有提权入口，也有「权限」按钮可以查看 Windows 实际授予了哪些特权，不用猜。</p>
+  </section>
+
+  <section>
+    <h2>安装</h2>
+    <div class="grid two">
+      <div class="card">
+        <h3>免安装版</h3>
+        <p>从 <a href="https://github.com/xRetia/FontHandler/releases">Releases</a> 下载 <code>FontHandler-v2.0.0.exe</code>，直接运行。同目录提供 <code>SHA256SUMS.txt</code> 校验。</p>
+      </div>
+      <div class="card">
+        <h3>自行运行</h3>
+        <p>需要 Python 3.10 以上：</p>
+        <pre><code>pip install -r requirements.txt
+python run.py</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>数据位置</h2>
+    <p>全部落在 <code>%LOCALAPPDATA%\FontHandler</code>，不污染系统目录：</p>
+    <ul>
+      <li><code>gasp/</code> —— 处理好的字体输出</li>
+      <li><code>backups/</code> —— 替换前的备份</li>
+      <li><code>userdata/</code> —— 配置</li>
+      <li><code>crash.log</code> —— 崩溃记录</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>质量</h2>
+    <p>83 项回归测试，覆盖 SFNT 解析与 GaspHack 字节等价、ACL 往返、特权错误码与提权链路。</p>
+    <pre><code>python selftest.py</code></pre>
+  </section>
+
+</main>
+
+<footer class="wrap">
+  <p>FontHandler · <a href="https://github.com/xRetia/FontHandler">xRetia/FontHandler</a></p>
+</footer>
+
+</body>
+</html>
