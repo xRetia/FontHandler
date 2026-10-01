@@ -1459,9 +1459,16 @@ def test_ui_checkbox_draws_a_tick_when_checked():
 
     _qapp()
     apply_style(QApplication.instance())
-    white = (0xFF, 0xFF, 0xFF)
 
     def tick_pixels(checked: bool, enabled: bool) -> int:
+        """Near-white pixels in the indicator.
+
+        Near-white rather than exact white: the tick is a scaled, antialiased
+        image, and demanding the exact ``#ffffff`` value makes the count depend
+        on DPI and leaves a broken render (no image at all) indistinguishable
+        from an unrendered one at a low threshold.  The indicator is the
+        leftmost ~18px; anything to the right is label text.
+        """
         box = QCheckBox("probe")
         box.setChecked(checked)
         box.setEnabled(enabled)
@@ -1470,16 +1477,19 @@ def test_ui_checkbox_draws_a_tick_when_checked():
         try:
             image = box.grab().toImage()
             count = 0
-            for y in range(image.height()):
-                for x in range(20):
-                    if image.pixelColor(x, y).getRgb()[:3] == white:
+            for y in range(min(24, image.height())):
+                for x in range(min(18, image.width())):
+                    r, g, b = image.pixelColor(x, y).getRgb()[:3]
+                    if r > 200 and g > 200 and b > 200:
                         count += 1
             return count
         finally:
             box.close()
 
     check_eq(tick_pixels(False, True), 0, "an unchecked box must not show a tick")
-    check(tick_pixels(True, True) > 8, "a checked box must draw a visible tick")
+    check(tick_pixels(True, True) > 8,
+          "a checked box must draw a visible tick (the indicator image is "
+          "missing or the stylesheet is overriding it)")
     check_eq(tick_pixels(True, False), 0, "a disabled box must not show a tick")
 
 

@@ -32,9 +32,19 @@ a = Analysis(
     [str(ROOT / "run.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[(str(ROOT / "docs" / "images" / "app.ico"), ".")]
-    if icon_path.exists()
-    else [],
+    # "fonthandler/ui/assets" -> "fonthandler/ui/assets": the QSS references the
+    # checkbox tick by relative path from the stylesheet's own directory, so the
+    # tree has to keep its shape inside the bundle.  Dropping it does not raise
+    # -- the image simply fails to load and the indicator renders as a bare
+    # accent-coloured block.
+    datas=(
+        [
+            (str(ROOT / "docs" / "images" / "app.ico"), "."),
+            (str(ROOT / "fonthandler" / "ui" / "assets"), "fonthandler/ui/assets"),
+        ]
+        if icon_path.exists()
+        else [(str(ROOT / "fonthandler" / "ui" / "assets"), "fonthandler/ui/assets")]
+    ),
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

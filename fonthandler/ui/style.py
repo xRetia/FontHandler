@@ -7,6 +7,7 @@ constants the pages import instead of hard-coding.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PyQt6.QtGui import QColor, QFont, QFontDatabase
@@ -14,12 +15,16 @@ from PyQt6.QtWidgets import QApplication
 
 __all__ = ["COLORS", "QSS", "apply_style", "mono_font"]
 
-ASSETS = Path(__file__).resolve().parent / "assets"
-
-
 def _asset_url(name: str) -> str:
-    """Absolute forward-slash URL for a stylesheet image reference."""
-    return (ASSETS / name).as_posix()
+    """Absolute forward-slash URL for a stylesheet image reference.
+
+    Points into the directory PyInstaller extracts to at runtime
+    (``sys._MEIPASS``), so the stylesheet finds the image in a frozen build
+    too.  Without this the tick silently degrades to a solid block and nobody
+    finds out until someone runs the exe.
+    """
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return (base / "assets" / name).as_posix()
 
 COLORS = {
     "bg": "#1e1f22",
@@ -127,7 +132,7 @@ QCheckBox::indicator:hover {{
 QCheckBox::indicator:checked {{
     background: {COLORS['accent']};
     border-color: {COLORS['accent']};
-    image: url({_asset_url('check.svg')});
+    image: url({_asset_url('check.png')});
 }}
 QCheckBox::indicator:checked:disabled {{
     background: {COLORS['border']};

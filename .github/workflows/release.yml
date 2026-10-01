@@ -71,20 +71,48 @@ jobs:
         shell: pwsh
         run: |
           $exe = '.\dist\FontHandler.exe'
+          $expected = '${{ steps.ver.outputs.number }}'
           if (-not (Test-Path $exe)) { throw '未生成 exe' }
           "体积：$([math]::Round((Get-Item $exe).Length / 1MB, 1)) MB"
-          # 单文件模式启动较慢（需解压到临时目录），给足时间
-          $p = Start-Process $exe -PassThru
-          Start-Sleep -Seconds 25
-          $p.Refresh()
-          if ($p.HasExited) { throw "打包后的程序启动即退出，退出码 $($p.ExitCode)" }
-          $title = $p.MainWindowTitle
-          if (-not $title) { throw '进程在运行但没有主窗口' }
-          "窗口标题：$title"
-          if ($title -notmatch '${{ steps.ver.outputs.number }}') {
-            throw "窗口标题未包含版本号 ${{ steps.ver.outputs.number }}"
+
+          # 单文件模式：bootloader 父进程解包后再 fork 出真正干活的子进程，
+          # 窗口在子进程里。父进程的 MainWindowTitle 永远是空的，所以要按
+          # 进程名去找带窗口的那个 —— 只看 Start-Process 返回的那个必然误报。
+          $launched = Start-Process $exe -PassThru
+          $deadline = (Get-Date).AddSeconds(90)
+          $window = $null
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 3
+            if ($launched.HasExited) {
+              throw "打包后的程序启动即退出，退出码 $($launched.ExitCode)"
+            }
+            # 只认本次启动的进程，否则 runner 上残留的同名进程会冒充成功。
+            $window = Get-Process FontHandler -ErrorAction SilentlyContinue |
+              Where-Object { $_.MainWindowHandle -ne 0 -and $_.StartTime -ge $launched.StartTime } |
+              Sort-Object StartTime | Select-Object -First 1
+            if ($window) { break }
           }
-          Stop-Process -Id $p.Id -Force
+          if (-not $window) { throw '90 秒内没有出现主窗口' }
+
+          $title = $window.MainWindowTitle
+          "窗口进程 PID $($window.Id)，标题：$title"
+          if (-not $title) { throw '找到窗口句柄但标题为空' }
+          if ($title -notmatch [regex]::Escape($expected)) {
+            throw "窗口标题未包含版本号 $expected"
+          }
+
+          # 打包漏掉的资源不会报错，只会让界面静默降级（例：checkbox 打勾变成
+          # 一个纯色方块）。所以确认解包目录里确实带了关键资源。
+          # PyInstaller 6 的子进程命令行里没有 _MEIPASS 参数，只能按修改时间
+          # 找本次启动刚解包的那个 _MEI* 目录。
+          $meipass = Get-ChildItem $env:TEMP -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $meipass) { throw '未找到 PyInstaller 解包目录，无法校验打包资源' }
+          $tick = Join-Path $meipass.FullName 'fonthandler\ui\assets\check.png'
+          if (-not (Test-Path $tick)) { throw "打包产物缺少 $tick，QSS 图片会静默失效" }
+          "资源校验通过：$tick"
+
+          Stop-Process -Name FontHandler -Force -ErrorAction SilentlyContinue
           "打包产物校验通过"
 
       - name: 计算校验和
