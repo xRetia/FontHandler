@@ -179,6 +179,12 @@ class SandboxSecurityBackend(SecurityBackend):
         self.sddls: dict[str, str] = {}
         self.inherited: dict[str, bool] = {}
         self.privileges: set[str] = set()
+        #: Make ``set_owner`` raise, so a test can check that a font which
+        #: cannot be handed to TrustedInstaller is refused rather than
+        #: installed anyway.  Real failures here need WRITE_OWNER on a file the
+        #: process does not own, which is exactly what the sandbox cannot
+        #: reproduce on its own.
+        self.fail_set_owner: bool = False
 
     def is_admin(self) -> bool:
         return True
@@ -197,6 +203,8 @@ class SandboxSecurityBackend(SecurityBackend):
         return self.sddls.get(self._key(path), "O:BAG:SYD:PAI(A;OICI;FA;;;SY)")
 
     def set_owner(self, path: Path, sid: str) -> None:
+        if self.fail_set_owner:
+            raise AclError(f"simulated SetNamedSecurityInfoW failure on {path}")
         self.owners[self._key(path)] = sid
 
     def apply_sddl(self, path: Path, sddl: str) -> None:

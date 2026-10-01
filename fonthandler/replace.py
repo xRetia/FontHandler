@@ -343,11 +343,24 @@ class ReplaceEngine:
             return ReplaceResult(name, ReplaceStatus.FAILED, f"写入 {staged.name} 失败: {exc}",
                                  acl_snapshot=snap)
 
+        # Fix the owner on the *staged* file, before it is moved into place.
+        # This has to be fail-closed.  The replacement is invisible until the
+        # next boot, by which point the user cannot log in to fix it: Windows
+        # renders the logon UI with these very fonts, and a file left owned by
+        # the administrator account instead of TrustedInstaller keeps the
+        # machine stuck on the sign-in screen.  Carrying on with a warning here
+        # replaces the font, breaks the boot, and reports success.
         if opts.set_owner:
             try:
                 acl.set_owner_ti(staged, self._security())
             except Exception as exc:  # noqa: BLE001
-                self.log("warn", f"{name}: 设置 TrustedInstaller 所有者失败 ({exc})")
+                self.log("error", f"{name}: 设置 TrustedInstaller 所有者失败，已中止该字体 ({exc})")
+                self.ops.unlink(staged)
+                return ReplaceResult(
+                    name, ReplaceStatus.FAILED,
+                    f"无法设置 TrustedInstaller 所有者，已中止替换（{exc}）",
+                    staged=staged, acl_snapshot=snap,
+                )
 
         # Hot replace first.
         try:
@@ -382,9 +395,12 @@ class ReplaceEngine:
     def _finalise_security(self, path: Path, opts: ReplaceOptions) -> None:
         """Make the replaced file look like a natively-installed font again.
 
-        The staged file inherited the directory DACL, so after the rename it
-        should already be pure-inheritance.  ``reset_to_inherited`` is the
-        belt-and-braces cleanup for anything left over by earlier tooling.
+        Belt-and-braces only, and deliberately warn-only.  The staged file
+        already inherited the directory DACL and got its owner fixed *before*
+        the rename (see ``replace_one``), so the file in place is correct even
+        if both calls here fail.  Warning is safe precisely because the
+        fail-closed check upstream is not: a failure there means the font must
+        not be installed at all.
         """
         if not opts.reset_acl:
             return

@@ -217,7 +217,40 @@ def run_replace(
         results.append(result)
         ctx.log("info" if result.ok else "error",
                 f"{result.name}: {result.status.value} {result.message}".strip())
+
+    _schedule_post_reboot_check(ctx, results)
     return results
+
+
+def _schedule_post_reboot_check(ctx: PipelineContext,
+                                results: list[ReplaceResult]) -> None:
+    """Ask for a self-check at the next logon, if any font was written.
+
+    Only the fonts that actually changed are recorded.  Listing every candidate
+    would turn each logon into a full ACL scan of the whitelist, and would make
+    a font the user later replaced through Windows Settings show up as a
+    problem they never caused.
+    """
+    from . import postboot
+
+    if ctx.is_sandbox:
+        return
+    touched = [r for r in results
+               if r.status in (ReplaceStatus.HOT, ReplaceStatus.QUEUED)]
+    if not touched:
+        postboot.clear_pending_check()
+        postboot.clear_runonce(ctx.registry)
+        return
+    try:
+        postboot.record_pending_check(
+            queued=[r.name for r in touched if r.status is ReplaceStatus.QUEUED],
+            replaced=[r.name for r in touched if r.status is ReplaceStatus.HOT],
+            backup=str(ctx._backup_dir()),
+            target_dir=str(ctx.target_dir),
+        )
+        ctx.log("info", "已安排下次登录时的自动字体缓存清理与权限自检")
+    except Exception as exc:  # noqa: BLE001 - autostart is best-effort
+        ctx.log("warn", f"无法安排重启后自检：{exc}")
 
 
 # ---------------------------------------------------------------------------

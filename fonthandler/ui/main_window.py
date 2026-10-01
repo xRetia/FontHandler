@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -15,7 +16,8 @@ from PyQt6.QtWidgets import (
     QTabWidget,
 )
 
-from .. import acl, config, elevation, pipeline, registry, systeminfo
+from .. import acl, backup, config, elevation, pipeline, postboot, registry, systeminfo
+from .common import Worker, confirm
 from .log_panel import LogPanel
 from .page_acl import AclPage
 from .page_backup import BackupPage
@@ -25,7 +27,7 @@ from .page_replace import ReplacePage
 from .single_instance import SingleInstance
 from .style import apply_style
 
-__all__ = ["FontHandlerApp", "main"]
+__all__ = ["FontHandlerApp", "main", "run_post_reboot_check"]
 
 #: Local-socket name; keeps a second launch from opening another window.
 APP_KEY = "FontHandler-2.0-pyqt-single-instance"
@@ -262,6 +264,10 @@ class FontHandlerApp(QMainWindow):
         if index >= 0:
             self.tabs.setCurrentIndex(index)
 
+    def run_post_reboot_check(self) -> None:
+        """The ``--reboot-check`` path, exposed so tests can drive it directly."""
+        run_post_reboot_check(self)
+
     def _log_startup(self) -> None:
         self.log("info", "FontHandler 2.0.0 启动")
         self.log("info", f"工作目录：{config.APP_HOME}")
@@ -287,18 +293,149 @@ class FontHandlerApp(QMainWindow):
             self.log("warn", "请点状态栏「以管理员身份重启」（Ctrl+Shift+A）")
 
 
+def run_post_reboot_check(window: "FontHandlerApp") -> None:
+    """Purge the cache, verify the fonts, then report -- or offer a rollback.
+
+    Runs on the GUI thread through a ``QTimer`` after the window is up.  The
+    cache purge is the slow part (stopping two services and deleting the
+    ``FontCache`` directory), so it goes on a worker thread; the dialog that
+    follows it is short and stays here.
+    """
+    check = postboot.load_pending_check()
+    if check is None:
+        postboot.clear_runonce()
+        return
+
+    names = list(dict.fromkeys(check.queued + check.replaced))
+    target_dir = Path(check.target_dir or config.SYSTEM_FONTS_DIR)
+    window.log("info", f"检测到上次重启前的 {len(names)} 个待检查字体，正在清理字体缓存…")
+
+    # The queued renames have now been applied by the boot, so the remaining
+    # queued names are checked too -- a rename that silently did not happen is
+    # exactly the case where the sign-in screen breaks.
+    worker = Worker(_purge_after_reboot, parent=window)
+    worker.log.connect(window.log)
+    worker.completed.connect(
+        lambda ok, message, _cb: _after_cache_purge(window, check, names, target_dir)
+    )
+    worker.start()
+
+
+def _purge_after_reboot(handle) -> str:
+    """Worker body: stop the services, delete the cache, leave them stopped.
+
+    Leaving the service stopped is deliberate.  It starts itself during the next
+    boot and then builds its cache from the fonts that are on disk *at that
+    point*, which is what makes the purge stick.  Restarting it here would just
+    let it rebuild the cache from the current files and undo the work.
+    """
+    from .. import fontcache
+
+    still_up = fontcache.stop_font_cache_service()
+    for path in fontcache._CACHE_PATHS:
+        _remove_cache_entry(path)
+    if still_up:
+        handle.log("warn", "以下字体缓存服务未能停止，缓存文件可能仍被占用：" + ", ".join(still_up))
+    return "字体缓存已清理"
+
+
+def _remove_cache_entry(path: Path) -> None:
+    import shutil
+
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.exists():
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _after_cache_purge(window, check, names, target_dir: Path) -> None:
+    """Report the outcome, or offer to roll back to the pre-replacement backup."""
+    window.log("info", "字体缓存清理完成")
+    problems = postboot.verify_owners(names, target_dir, security=window.security)
+    postboot.clear_pending_check()
+    postboot.clear_runonce(window.registry)
+
+    if not problems:
+        QMessageBox.information(
+            window,
+            "重启后自检",
+            f"字体缓存已清理，{len(names)} 个字体的权限正常。",
+        )
+        return
+
+    window.log("error", f"自检发现 {len(problems)} 个字体状态异常")
+    box = QMessageBox(window)
+    box.setIcon(QMessageBox.Icon.Critical)
+    box.setWindowTitle("重启后自检发现问题")
+    box.setText(f"{len(problems)} 个已替换的字体状态异常。")
+    box.setInformativeText(
+        "如果登录界面出现方框、错位或无法进入桌面，"
+        "这些问题最常见的原因是字体文件的所有者不是 TrustedInstaller。\n\n"
+        + "\n".join(p.describe() for p in problems)
+    )
+    restore = box.addButton("从备份还原", QMessageBox.ButtonRole.DestructiveRole)
+    box.addButton("稍后处理", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(box.buttons()[-1])
+    box.exec()
+    if box.clickedButton() is restore:
+        _rollback_from_dialog(window, check, target_dir)
+
+
+def _rollback_from_dialog(window, check, target_dir: Path) -> None:
+    """Restore the backup taken before the replacement that caused the problem."""
+    backup_dir = Path(check.backup) if check.backup else config.APP_HOME / "backups"
+    packages = backup.list_backups(backup_dir)
+    if not packages:
+        QMessageBox.warning(window, "没有可用备份", f"{backup_dir} 中没有备份包。")
+        return
+    package = packages[0]
+    if not confirm(
+        window,
+        "从备份还原",
+        f"将还原 {package.count} 个字体到 {target_dir}。",
+        package.summary(),
+    ):
+        return
+    ctx = window.ctx.context()
+    ctx.log = window.log
+    results = pipeline.run_restore(ctx, package)
+    failed = sum(1 for r in results if not r.ok)
+    from .. import fontcache
+
+    fontcache.clear_font_cache()
+    QMessageBox.information(
+        window,
+        "还原完成",
+        f"已还原 {len(results) - failed} 个字体"
+        + (f"，{failed} 个失败。" if failed else "，字体缓存已清理。"),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv if argv is None else argv)
+    reboot_check = "--reboot-check" in argv
+
     app = QApplication(sys.argv)
     apply_style(app)
 
     guard = SingleInstance(APP_KEY)
     if not guard.claim():
-        # Another copy already owns the window.
+        # Another copy already owns the window.  If that copy is a normal one it
+        # is already showing everything the user needs, so the check is simply
+        # dropped -- but it has to clear the state, or the next logon repeats it.
+        if reboot_check:
+            postboot.clear_pending_check()
+            postboot.clear_runonce()
         return 0
 
     win = FontHandlerApp()
     win.guard = guard
     win.show()
+    if reboot_check:
+        QTimer.singleShot(0, lambda: win.run_post_reboot_check())
     try:
         return app.exec()
     finally:

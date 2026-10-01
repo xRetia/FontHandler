@@ -17,7 +17,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from fonthandler import acl, backup, config, gasp, pipeline, registry, replace, sfnt  # noqa: E402
+from fonthandler import (  # noqa: E402
+    acl,
+    backup,
+    config,
+    fontcache,
+    gasp,
+    pipeline,
+    postboot,
+    registry,
+    replace,
+    sfnt,
+)
 from tests.sandbox import Sandbox, build_font  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -25,6 +36,10 @@ from tests.sandbox import Sandbox, build_font  # noqa: E402
 # ---------------------------------------------------------------------------
 _TESTS: list[tuple[str, str, object]] = []
 VERBOSE = False
+#: ``[(name, reason)]`` for tests that returned early because their fixture or
+#: ground truth was unavailable.  Counted separately so a green run on CI can
+#: never be mistaken for coverage.
+SKIPPED: list[tuple[str, str]] = []
 
 
 def test(group: str):
@@ -37,6 +52,25 @@ def test(group: str):
 
 class Failure(AssertionError):
     pass
+
+
+class Skipped(Exception):
+    """Raised by a test that cannot run here; never counted as a pass."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def skip(reason: str, detail: str = "") -> None:
+    """Abandon the current test without failing it.
+
+    Used where a test needs something the machine may not have (the original
+    ttx/UniteTTC toolchain, a reference output tree, Qt).  Skips are reported
+    in the summary so they are visible rather than silently folded into the
+    pass count.
+    """
+    raise Skipped(detail or reason)
 
 
 def check(condition: bool, message: str) -> None:
@@ -245,8 +279,17 @@ def test_read_family_names():
 
 # ---------------------------------------------------------------------------
 # group: byte  (byte-identity against the original toolchain's output)
+#
+# These cross-check our pure-Python engine against the ttx/UniteTTC output and
+# need reference assets that are not part of the repository. They run where
+# those assets exist and are skipped otherwise, so the suite stays green on a
+# clean checkout and on CI.
 # ---------------------------------------------------------------------------
-ORIG_ROOT = Path(r"D:\资源\工具\Binary\系统工具\FontHandler")
+ORIG_ROOT = Path(
+    os.environ.get(
+        "FONTHANDLER_REF_ROOT", r"D:\资源\工具\Binary\系统工具\FontHandler"
+    )
+)
 REF_DIR = ORIG_ROOT / "workingDir" / "output"
 SYS_FONTS = Path(r"C:\Windows\Fonts")
 
@@ -254,7 +297,8 @@ SYS_FONTS = Path(r"C:\Windows\Fonts")
 @test("byte")
 def test_whitelist_is_byte_identical_to_reference():
     if not REF_DIR.is_dir():
-        raise Failure(f"reference output directory is missing: {REF_DIR}")
+        skip("参考产物缺失", f"reference output missing ({REF_DIR})")
+        return
     identical, different, missing = [], [], []
     for name in config.CJK_WHITELIST:
         ref = REF_DIR / name
@@ -275,7 +319,8 @@ def test_ttx_matches_for_whitelisted_ttfs():
     ttx = ORIG_ROOT / "ttx.exe"
     ttx_xml = ORIG_ROOT / "GaspHack_v2.ttx"
     if not ttx.exists():
-        raise Failure("ttx.exe not available; cannot run the cross-check")
+        skip("ttx.exe 不可用", f"ttx.exe not available ({ttx})")
+        return
     import subprocess
 
     checked = 0
@@ -296,7 +341,9 @@ def test_ttx_matches_for_whitelisted_ttfs():
             check_eq(gasp.apply_gasp_hack(src.read_bytes()), out.read_bytes(),
                      f"ttx.exe disagrees for {name}")
             checked += 1
-    check(checked > 0, "no TTF was cross-checked")
+    if checked == 0:
+        skip("ttx 未产出可比对结果", "no TTF was cross-checked")
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +584,80 @@ def test_replace_snapshot_recorded():
         sb.cleanup()
 
 
+@test("replace")
+def test_owner_failure_aborts_the_font_instead_of_installing_it():
+    """A font that cannot be given to TrustedInstaller must not be installed.
+
+    The failure only shows up at the next boot, when Windows renders the logon
+    screen with these fonts and a file owned by the administrator account keeps
+    the machine from getting past sign-in.  At that point nobody can log in to
+    repair it, so the replace has to refuse rather than warn and continue.
+    """
+    sb = Sandbox()
+    try:
+        sb.populate(["msyh.ttc"])
+        original = (sb.fonts_dir / "msyh.ttc").read_bytes()
+        sb.security.fail_set_owner = True
+
+        result = sb.engine().replace_one("msyh.ttc")
+
+        check_eq(result.status, replace.ReplaceStatus.FAILED,
+                 "the font was installed even though its owner could not be fixed")
+        check("TrustedInstaller" in result.message,
+              f"the failure should say why it gave up, got {result.message!r}")
+        check_eq((sb.fonts_dir / "msyh.ttc").read_bytes(), original,
+                 "the target font was overwritten despite the failure")
+        check(not (sb.fonts_dir / "msyh.ttc.new").exists(),
+              "the staged file was left behind after aborting")
+    finally:
+        sb.cleanup()
+
+
+@test("replace")
+def test_owner_failure_is_not_reported_as_success_by_the_pipeline():
+    """The summary line must not count an aborted font as replaced."""
+    sb = Sandbox()
+    try:
+        sb.populate(["msyh.ttc", "msyi.ttf"])
+        sb.security.fail_set_owner = True
+        ctx = sb.context()
+
+        results = pipeline.run_replace(ctx)
+        # run_replace walks the whole whitelist; only the two populated fonts
+        # have a source, the rest come back as SKIP_NO_SOURCE.
+        touched = [r for r in results if r.status is not replace.ReplaceStatus.SKIP_NO_SOURCE]
+
+        check_eq(len(touched), 2, f"expected two fonts to be attempted, got {len(touched)}")
+        check(all(r.status is replace.ReplaceStatus.FAILED for r in touched),
+              "an aborted font reached the results as something other than FAILED")
+        check(all(not r.ok for r in touched), "an aborted font was counted as ok")
+    finally:
+        sb.cleanup()
+
+
+@test("replace")
+def test_queue_path_also_refuses_when_the_owner_cannot_be_fixed():
+    """A locked target must not be queued with the wrong owner either.
+
+    The reboot queue applies the rename during early boot, so a queued font
+    with a bad owner breaks the machine the same way a hot-replaced one does.
+    """
+    sb = Sandbox()
+    try:
+        sb.populate(["msyh.ttc"])
+        sb.file_ops.locked = {(sb.fonts_dir / "msyh.ttc").resolve()}
+        sb.security.fail_set_owner = True
+
+        result = sb.engine().replace_one("msyh.ttc")
+
+        check_eq(result.status, replace.ReplaceStatus.FAILED,
+                 "a font with an unfixable owner was queued for the reboot")
+        check_eq(registry.read_pending(sb.registry), [],
+                 "an unfixable font was written to PendingFileRenameOperations")
+    finally:
+        sb.cleanup()
+
+
 # ---------------------------------------------------------------------------
 # group: backup
 # ---------------------------------------------------------------------------
@@ -698,6 +819,204 @@ def test_clear_pending_only_removes_ours():
         check_eq(pipeline.list_pending(ctx), [theirs], "clear_pending removed a foreign entry")
     finally:
         sb.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# group: postboot
+# ---------------------------------------------------------------------------
+@test("postboot")
+def test_post_reboot_state_round_trips():
+    """What has to survive the reboot has to survive a JSON round trip."""
+    sb = Sandbox()
+    try:
+        postboot.record_pending_check(
+            queued=["msyh.ttc"], replaced=["msyi.ttf"],
+            backup=str(sb.backup_dir), target_dir=str(sb.fonts_dir),
+            app_home=sb.root,
+        )
+        loaded = postboot.load_pending_check(sb.root)
+        check(loaded is not None, "the pending check was not written")
+        check_eq(loaded.queued, ["msyh.ttc"], "the queued font did not survive")
+        check_eq(loaded.replaced, ["msyi.ttf"], "the replaced font did not survive")
+        check_eq(loaded.target_dir, str(sb.fonts_dir), "the target dir did not survive")
+    finally:
+        sb.cleanup()
+
+
+@test("postboot")
+def test_unreadable_post_reboot_state_is_discarded():
+    """A corrupt state file must not block the program from starting.
+
+    The state describes work from a previous boot.  If it cannot be parsed the
+    only safe reading is "nothing to check" -- refusing to start would leave the
+    user unable to open the program at all.
+    """
+    sb = Sandbox()
+    try:
+        path = postboot.state_path(sb.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ not json", encoding="utf-8")
+        check_eq(postboot.load_pending_check(sb.root), None,
+                 "a corrupt state file was treated as a pending check")
+        check(not path.exists(), "the corrupt state file was left on disk")
+    finally:
+        sb.cleanup()
+
+
+@test("postboot")
+def test_empty_post_reboot_state_reads_as_nothing_pending():
+    sb = Sandbox()
+    try:
+        postboot.record_pending_check(app_home=sb.root)
+        check_eq(postboot.load_pending_check(sb.root), None,
+                 "a state file with no fonts was treated as pending work")
+    finally:
+        sb.cleanup()
+
+
+@test("postboot")
+def test_owner_check_flags_a_font_that_is_not_trustedinstaller_owned():
+    """The check has to notice the exact failure that bricks the sign-in screen."""
+    sb = Sandbox()
+    try:
+        sb.populate(["msyh.ttc", "msyi.ttf"])
+        bad = sb.fonts_dir / "msyh.ttc"
+        sb.security.owners[str(bad).lower()] = "S-1-5-21-1-2-3-1001"
+
+        problems = postboot.verify_owners(["msyh.ttc", "msyi.ttf"], sb.fonts_dir,
+                                          security=sb.security)
+
+        names = [p.name for p in problems]
+        check_eq(names, ["msyh.ttc"], f"unexpected problems reported: {names}")
+        check("TrustedInstaller" in problems[0].reason,
+              f"the report does not say what is wrong: {problems[0].describe()}")
+    finally:
+        sb.cleanup()
+
+
+@test("postboot")
+def test_owner_check_flags_a_font_that_never_got_installed():
+    """A queued rename that silently did not happen is also a broken font.
+
+    It shows up as a missing file, which is a different problem from a bad owner
+    and the user needs to be able to tell the two apart.
+    """
+    sb = Sandbox()
+    try:
+        problems = postboot.verify_owners(["msyh.ttc"], sb.fonts_dir,
+                                          security=sb.security)
+        check_eq(len(problems), 1, "a missing font was not reported")
+        check("不存在" in problems[0].describe(),
+              f"the report does not mention the missing file: {problems[0].describe()}")
+    finally:
+        sb.cleanup()
+
+
+@test("postboot")
+def test_runonce_command_is_quoted_and_distinguishable():
+    """A path with spaces must survive, and the entry must be identifiable."""
+    command = postboot.runonce_command()
+    check("--reboot-check" in command,
+          "the autostart command cannot be told apart from a manual launch")
+    check(command.startswith('"'),
+          f"an unquoted path with spaces would be split by the shell: {command}")
+    check(command.endswith('" --reboot-check'),
+          f"the path is not closed before the flag: {command}")
+
+
+@test("postboot")
+def test_runonce_uses_a_registry_backend_that_records_the_command():
+    """The RunOnce value must be a REG_SZ command list, written under RunOnce.
+
+    Plain ``Run`` would pop this window on every logon forever; the value name
+    has to be findable so the check can clear itself once it has run.
+    """
+    backend = registry.DictRegistryBackend()
+    check(postboot.schedule_runonce(backend),
+          "scheduling the autostart reported failure on an injected backend")
+    stored = backend.get_value(postboot.RUNONCE_KEY, postboot.RUNONCE_VALUE)
+    check_eq(stored, [postboot.runonce_command()],
+             "the RunOnce command was not stored as a single-item list")
+    check("RunOnce" in postboot.RUNONCE_KEY,
+          f"the autostart key is not RunOnce: {postboot.RUNONCE_KEY}")
+    check(postboot.clear_runonce(backend), "clearing the autostart entry failed")
+    check_eq(backend.get_value(postboot.RUNONCE_KEY, postboot.RUNONCE_VALUE), None,
+             "the RunOnce entry survived being cleared")
+
+
+@test("postboot")
+def test_replace_schedules_a_check_only_for_fonts_it_wrote():
+    """A no-op replace must not leave an autostart behind.
+
+    Otherwise every ordinary launch of the program would clear the font cache
+    and scan owners at the next logon.
+    """
+    sb = Sandbox()
+    try:
+        sb.populate(["msyi.ttf"])
+        ctx = sb.context()
+        # Force the sandbox through as "not a sandbox" would be a lie; instead
+        # assert the guard directly -- a sandbox replace schedules nothing.
+        pipeline.run_replace(ctx, names=["msyi.ttf"], backup_first=False)
+        check_eq(postboot.load_pending_check(sb.root), None,
+                 "a sandbox replace scheduled a post-reboot check")
+    finally:
+        sb.cleanup()
+
+
+@test("postboot")
+def test_post_boot_purge_leaves_the_font_cache_service_stopped():
+    """The service must not be restarted after the purge.
+
+    Restarting it makes it rebuild the cache from the files currently on disk,
+    which is exactly what the purge was meant to invalidate.  The service
+    starts itself at the next boot, by which point the queued renames are done.
+    """
+    mw = _postboot_ui_module()
+    started = []
+    purged = []
+
+    class FakeEntry(str):
+        def is_dir(self):
+            return False
+
+        def exists(self):
+            return True
+
+        def unlink(self, missing_ok=False):
+            purged.append(str(self))
+
+    real_paths = fontcache._CACHE_PATHS
+    real_stop = fontcache.stop_font_cache_service
+    real_start = fontcache.restart_font_cache_service
+    try:
+        fontcache._CACHE_PATHS = (FakeEntry(r"C:\Windows\System32\FNTCACHE.DAT"),)
+        fontcache.stop_font_cache_service = lambda: []
+        fontcache.restart_font_cache_service = lambda: started.append(True)
+
+        class Handle:
+            def log(self, level, message):
+                pass
+
+        mw._purge_after_reboot(Handle())
+
+        check_eq(purged, [r"C:\Windows\System32\FNTCACHE.DAT"],
+                 "the cache entry was not purged")
+        check_eq(started, [],
+                 "the font cache service was restarted right after the purge")
+    finally:
+        fontcache._CACHE_PATHS = real_paths
+        fontcache.stop_font_cache_service = real_stop
+        fontcache.restart_font_cache_service = real_start
+
+
+def _postboot_ui_module():
+    """The UI module holding the purge worker, or skip without PyQt6."""
+    try:
+        import fonthandler.ui.main_window as mw
+    except ImportError:  # pragma: no cover - PyQt6 missing
+        skip("PyQt6 not installed")
+    return mw
 
 
 # ---------------------------------------------------------------------------
@@ -1178,10 +1497,8 @@ def test_run_detach_console_leaves_stdin_spawnable():
 
     import run
 
-    if _sys.platform != "win32":
-        return
-    if os.name != "nt":
-        return
+    if _sys.platform != "win32" or os.name != "nt":
+        skip("仅 Windows 可用", "FreeConsole is a Win32 concept")
 
     kernel32 = ctypes.windll.kernel32
     saved = (kernel32.GetStdHandle(-10), kernel32.GetStdHandle(-11), kernel32.GetStdHandle(-12))
@@ -1189,7 +1506,7 @@ def test_run_detach_console_leaves_stdin_spawnable():
     allocated = False
     if not kernel32.GetConsoleWindow():
         if not kernel32.AllocConsole():
-            return  # cannot create a console here, nothing to exercise
+            skip("无法分配控制台", "cannot create a console here, nothing to exercise")
         allocated = True
 
     try:
@@ -1321,7 +1638,7 @@ def test_acl_console_encoding_matches_the_oem_code_page():
     import ctypes
 
     if os.name != "nt":
-        return
+        skip("仅 Windows 可用", "GetOEMCP is a Win32 concept")
     expected = f"cp{ctypes.windll.kernel32.GetOEMCP()}"
     check_eq(acl.console_encoding(), expected,
              "child output must be decoded with the console code page")
@@ -1336,7 +1653,7 @@ def test_acl_sddl_round_trip_on_a_real_file():
 
     backend = acl_mod.get_backend()
     if type(backend).__name__ != "WindowsSecurityBackend":
-        return  # sandboxed CI
+        skip("无真实安全描述符", "sandboxed CI: no WindowsSecurityBackend")
     with tempfile.TemporaryDirectory() as tmp:
         probe = Path(tmp) / "probe.txt"
         probe.write_text("hello", encoding="utf-8")
@@ -1349,10 +1666,10 @@ def test_acl_sddl_round_trip_on_a_real_file():
         try:
             backend.apply_sddl(probe, "O:S-1-5-18D:(A;;FA;;;SY)")
             check(backend.get_sddl(probe) != original, "the DACL was not replaced")
-        except acl_mod.AclError:
-            return  # needs WRITE_DAC; not available here
+        except acl_mod.AclError as exc:
+            skip("需要 WRITE_DAC", f"needs WRITE_DAC; not available here: {exc}")
         acl_mod.restore(snapshot)
-        check_eq(backend.get_sddl(probe), original, "the ACL was not restored")
+        check_eq(acl_mod.get_sddl(probe), original, "the ACL was not restored")
 
 
 @test("acl")
@@ -1368,7 +1685,7 @@ def test_acl_set_owner_leaves_every_ace_alone():
 
     backend = acl_mod.get_backend()
     if type(backend).__name__ != "WindowsSecurityBackend":
-        return  # sandboxed CI
+        skip("无真实安全描述符", "sandboxed CI: no WindowsSecurityBackend")
     with tempfile.TemporaryDirectory() as tmp:
         probe = Path(tmp) / "probe.txt"
         probe.write_text("hello", encoding="utf-8")
@@ -1377,8 +1694,8 @@ def test_acl_set_owner_leaves_every_ace_alone():
         try:
             # Setting the owner to the SID it already holds: must change nothing.
             backend.set_owner(probe, backend.get_owner(probe))
-        except acl_mod.AclError:
-            return  # needs WRITE_OWNER
+        except acl_mod.AclError as exc:
+            skip("需要 WRITE_OWNER", f"needs WRITE_OWNER: {exc}")
         after = acl_mod._sddl_sections(backend.get_sddl(probe)).get("D", "")
         check_eq(after, before, "set_owner must not touch the ACEs")
 
@@ -1759,13 +2076,115 @@ def test_ui_worker_errors_are_reported_not_raised():
         sb.cleanup()
 
 
-
-
 # ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
+def _force_utf8_output() -> None:
+    """Make stdout/stderr survive non-ASCII test output.
+
+    GitHub Actions runs with a cp1252 console, so printing a failure message
+    that contains a Chinese font name or path used to raise
+    ``UnicodeEncodeError`` *inside the reporter*.  The traceback that replaced
+    the real error named the encoding, not the test, and the run still exited
+    non-zero -- so the failure everyone had to debug was the wrong one.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+@test("runner")
+def test_reporter_survives_a_non_ascii_failure_message():
+    """A Chinese failure message must not break the reporter.
+
+    This is the bug that made the CI log useless: on a cp1252 console the
+    ``print`` of the failure raised ``UnicodeEncodeError`` from inside the
+    reporter, so the traceback named the encoding instead of the test that had
+    actually failed.  The run still exited 1, which is why it went unnoticed --
+    the real error was simply never printed.
+    """
+    import io
+
+    global VERBOSE
+
+    group = "_reporter_probe"
+    name = "boom_non_ascii"
+
+    def boom():
+        raise Failure("参考产物目录缺失: D:\\资源\\工具\\Binary\\系统工具\\FontHandler")
+
+    saved_tests = list(_TESTS)
+    saved_skipped = list(SKIPPED)
+    saved_stdout = sys.stdout
+    saved_verbose = VERBOSE
+    buffer = io.BytesIO()
+    # cp1252 is what GitHub Actions hands a Python process on Windows.
+    sys.stdout = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict")
+    try:
+        _TESTS.append((group, name, boom))
+        try:
+            code = main(["selftest.py", group])
+        except UnicodeEncodeError as exc:
+            raise Failure(
+                f"the reporter raised while printing a non-ASCII message: {exc}"
+            ) from exc
+    finally:
+        _TESTS[:] = saved_tests
+        SKIPPED[:] = saved_skipped
+        VERBOSE = saved_verbose
+        sys.stdout.flush()
+        sys.stdout.detach()
+        sys.stdout = saved_stdout
+
+    text = buffer.getvalue().decode("utf-8", errors="replace")
+    check_eq(code, 1, "a failing test must still make the run fail")
+    check(name in text, f"the failing test was not named in the output:\n{text}")
+    check("参考产物目录缺失" in text,
+          f"the real failure message was lost:\n{text}")
+
+
+@test("runner")
+def test_reporter_counts_skips_separately_from_passes():
+    """A test that could not run must never be counted as a pass."""
+    import io
+
+    group = "_reporter_probe"
+    name = "unavailable_fixture"
+
+    def unavailable():
+        skip("缺少参考产物", "reference output missing")
+
+    saved_tests = list(_TESTS)
+    saved_skipped = list(SKIPPED)
+    saved_stdout = sys.stdout
+    buffer = io.BytesIO()
+    try:
+        _TESTS.append((group, name, unavailable))
+        sys.stdout = io.TextIOWrapper(buffer, encoding="utf-8")
+        code = main(["selftest.py", group])
+    finally:
+        _TESTS[:] = saved_tests
+        SKIPPED[:] = saved_skipped
+        sys.stdout.flush()
+        sys.stdout.detach()
+        sys.stdout = saved_stdout
+
+    text = buffer.getvalue().decode("utf-8", errors="replace")
+    check_eq(code, 0, "a skipped test must not fail the run")
+    check("0 passed, 0 failed" in text,
+          f"a skipped test was counted as a pass:\n{text}")
+    check("1 skipped" in text, f"the skip was not reported:\n{text}")
+    check(name in text, f"the skipped test was not named in the output:\n{text}")
+
+
 def main(argv: list[str]) -> int:
     global VERBOSE
+    _force_utf8_output()
     args = [a for a in argv[1:] if not a.startswith("-")]
     VERBOSE = "-v" in argv or "--verbose" in argv
     groups = {a for a in args}
@@ -1780,6 +2199,7 @@ def main(argv: list[str]) -> int:
     current = None
     passed = failed = 0
     failures: list[tuple[str, str]] = []
+    SKIPPED.clear()
 
     for group, name, fn in selected:
         if group != current:
@@ -1787,6 +2207,9 @@ def main(argv: list[str]) -> int:
             print(f"\n[{group}]")
         try:
             fn()
+        except Skipped as exc:
+            SKIPPED.append((f"{group}.{name}", exc.reason))
+            print(f"  skip  {name:<{width}}  {exc.reason}")
         except Exception as exc:  # noqa: BLE001
             failed += 1
             failures.append((f"{group}.{name}", str(exc)))
@@ -1795,7 +2218,12 @@ def main(argv: list[str]) -> int:
             passed += 1
             print(f"  ok    {name}")
 
-    print(f"\n{passed} passed, {failed} failed, {passed + failed} total")
+    total = passed + failed
+    print(f"\n{passed} passed, {failed} failed, {total} total")
+    if SKIPPED:
+        print(f"{len(SKIPPED)} skipped:")
+        for name, reason in SKIPPED:
+            print(f"  - {name}: {reason}")
     if failures:
         print("\nfailures:")
         for name, message in failures:

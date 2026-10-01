@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FontHandler — Windows 字体处理工具</title>
-<meta name="description" content="FontHandler 是一款 Windows 字体处理工具，用纯 Python 实现 GaspHack 引擎，并支持系统字体热替换、TrustedInstaller 权限管理与一键还原。">
+<meta name="description" content="FontHandler 是一款 Windows 字体 GaspHack 工具，提供补丁字体生成、系统字体替换、TrustedInstaller 权限还原与重启后自检。">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -14,8 +14,8 @@
     <p class="tag">Windows 字体处理工具</p>
     <h1>FontHandler</h1>
     <p class="lead">
-      用纯 Python 重新实现 GaspHack 引擎，替代 <code>ttx.exe</code>、<code>UniteTTC.exe</code>
-      等外部工具链；在此之上提供系统字体热替换、TrustedInstaller 权限托管与完整还原。
+      生成 GaspHack 补丁字体，替换系统字体，并把字体的所有者和权限还原为
+      TrustedInstaller 状态。替换后重启，会自动清缓存并检查权限。
     </p>
     <div class="actions">
       <a class="btn primary" href="https://github.com/xRetia/FontHandler/releases">下载</a>
@@ -38,11 +38,11 @@
     <div class="grid">
       <div class="card">
         <h3>中文显示发虚</h3>
-        <p>GaspHack 按字号切换不同的 hinting 与网格拟合参数。原版工具链需要 <code>ttx</code> 加 <code>.ttx</code> 脚本逐个处理，TTC 还要先拆分再重组。FontHandler 把整套逻辑写成纯 Python，TTC 直接原地处理。</p>
+        <p>GaspHack 按字号切换不同的 hinting 与网格拟合参数，字形轮廓不变。整套处理在界面里完成，TTC 原地处理，不需要拆分再重组。</p>
       </div>
       <div class="card">
         <h3>改完不生效</h3>
-        <p>系统字体有缓存，热替换需要处理文件锁、所有者与 FontCache 服务。界面提供完整流程：备份 → 替换 → 刷新缓存，不支持的操作自动进重启队列。</p>
+        <p>系统字体有缓存，替换需要处理文件锁、所有者与 FontCache 服务。界面提供完整流程：备份 → 替换 → 刷新缓存，被占用的文件自动进重启队列。</p>
       </div>
       <div class="card">
         <h3>改完不敢还原</h3>
@@ -78,6 +78,17 @@
       <img src="images/pending.png" alt="重启队列页面" loading="lazy">
       <figcaption>重启队列 —— 被占用而无法即时替换的文件在这里排队</figcaption>
     </figure>
+  </section>
+
+  <section>
+    <h2>重启后自检</h2>
+    <p>替换完成后重启电脑。重启队列里的字体在启动时生效，登录后 FontHandler 会自动运行一次：</p>
+    <ol>
+      <li><strong>清理字体缓存</strong> —— 停在服务状态删掉缓存，让它下次启动时按新字体重建</li>
+      <li><strong>校验权限</strong> —— 逐个确认所有者确实是 TrustedInstaller</li>
+      <li><strong>有问题就提示</strong> —— 列出异常字体，可以一键从备份还原</li>
+    </ol>
+    <p>所有者不对是登录界面出问题的常见原因：登录界面用的就是这些字体，一旦所有者在管理员账户上，可能进不去桌面。自检在还能登录时发现它，并给出还原入口。</p>
   </section>
 
   <section>
@@ -120,7 +131,7 @@ python run.py</code></pre>
 
   <section>
     <h2>质量</h2>
-    <p>83 项回归测试，覆盖 SFNT 解析与 GaspHack 字节等价、ACL 往返、特权错误码与提权链路。</p>
+    <p>97 项回归测试，覆盖 SFNT 解析与 GaspHack 字节等价、ACL 往返、特权错误码、提权链路、所有者设置失败时的中止行为与重启后自检。</p>
     <pre><code>python selftest.py</code></pre>
   </section>
 

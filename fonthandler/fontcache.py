@@ -5,10 +5,26 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-__all__ = ["clear_font_cache", "broadcast_font_change", "WM_FONTCHANGE"]
+__all__ = [
+    "clear_font_cache",
+    "restart_font_cache_service",
+    "broadcast_font_change",
+    "WM_FONTCHANGE",
+]
 
 
 WM_FONTCHANGE = 0x1D
+
+#: The two services that hold the cache files open.  ``FontCache3.0.0.0`` is
+#: the real service name on Windows 10/11; getting it wrong makes ``net stop``
+#: fail silently and the cache files stay locked.
+FONT_CACHE_SERVICES = ("FontCache", "FontCache3.0.0.0")
+
+_CACHE_PATHS = (
+    Path(r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\FontCache"),
+    Path(r"C:\Windows\System32\FNTCACHE.DAT"),
+    Path(r"C:\Windows\SysWOW64\FNTCACHE.DAT"),
+)
 
 
 def _run(*cmd: str) -> bool:
@@ -21,35 +37,80 @@ def _run(*cmd: str) -> bool:
         return False
 
 
-def clear_font_cache() -> bool:
-    """Attempt to purge Windows font cache (protective: no-ops off-Windows)."""
+def stop_font_cache_service() -> list[str]:
+    """Stop the font cache services.  Returns the ones that are still up.
+
+    Windows treats a font cache service that refuses to stop as a hint to use
+    the Service Control Manager instead, so a leftover service is reported
+    rather than assumed gone.
+    """
+    if os.name != "nt":
+        return []
+    for name in FONT_CACHE_SERVICES:
+        _run("net", "stop", name)
+    still_running = []
+    for name in FONT_CACHE_SERVICES:
+        try:
+            from .acl import run_hidden
+
+            result = run_hidden(["sc", "query", name])
+            if result.returncode == 0 and "RUNNING" in _decode(result):
+                still_running.append(name)
+        except Exception:  # noqa: BLE001 - service state is advisory only
+            continue
+    return still_running
+
+
+def _decode(result) -> str:
+    from .acl import console_encoding
+
+    return (result.stdout or b"").decode(console_encoding(), errors="replace")
+
+
+def restart_font_cache_service() -> bool:
+    """Start the font cache services again (they autostart, so this is optional)."""
     if os.name != "nt":
         return True
-    services = [
-        ["net", "stop", "FontCache"],
-        ["net", "stop", "FontCache3.0.0.0"],
-    ]
-    for s in services:
-        _run(*s)
-    cache_dirs = [
-        Path(r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\FontCache"),
-        Path(r"C:\Windows\System32\FNTCACHE.DAT"),
-        Path(r"C:\Windows\SysWOW64\FNTCACHE.DAT"),
-    ]
-    for d in cache_dirs:
+    ok = True
+    for name in FONT_CACHE_SERVICES:
+        ok = _run("net", "start", name) and ok
+    return ok
+
+
+def clear_font_cache(restart_service: bool = True) -> bool:
+    """Purge the Windows font cache.
+
+    ``restart_service`` has to be ``False`` when some fonts are still sitting in
+    the reboot queue.  Restarting the service immediately makes it re-read the
+    *current* font files -- which are still the old ones, because the queued
+    renames only run during the next boot -- and the freshly built cache is then
+    wrong for the fonts that were replaced.  Leaving the service stopped lets it
+    start during the next boot and build the cache from the new files instead.
+
+    Returns True when the cache files were purged; a service that would not stop
+    is reported through the log rather than treated as a failure, since the
+    files may still be deletable.
+    """
+    if os.name != "nt":
+        return True
+    stop_font_cache_service()
+    removed = 0
+    for path in _CACHE_PATHS:
         try:
-            if d.is_dir():
-                for f in d.rglob("*"):
+            if path.is_dir():
+                for f in path.rglob("*"):
                     try:
                         f.unlink(missing_ok=True)
+                        removed += 1
                     except OSError:
                         pass
-            elif d.exists():
-                d.unlink(missing_ok=True)
+            elif path.exists():
+                path.unlink(missing_ok=True)
+                removed += 1
         except OSError:
             pass
-    for s in reversed(services):
-        _run(*s)
+    if restart_service:
+        restart_font_cache_service()
     return True
 
 

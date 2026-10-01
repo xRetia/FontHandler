@@ -53,9 +53,10 @@ jobs:
         run: |
           $n = '${{ steps.ver.outputs.number }}'
           $parts = $n.Split('.')
-          (Get-Content config.py -Raw) `
+          # config.py lives in the package, not at the repo root.
+          (Get-Content fonthandler\config.py -Raw) `
             -replace 'APP_VERSION = "[^"]+"', "APP_VERSION = `"$n`"" `
-            | Set-Content config.py -Encoding UTF8
+            | Set-Content fonthandler\config.py -Encoding UTF8
           $vi = Get-Content version_info.txt -Raw
           $vi = $vi -replace '\d+,\s*\d+,\s*\d+,\s*\d+', "$($parts[0]), $($parts[1]), $($parts[2]), 0"
           $vi = $vi -replace "'2\.0\.0'", "'$n'"
