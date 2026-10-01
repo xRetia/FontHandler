@@ -1,0 +1,132 @@
+name: 发布
+
+# 打 tag 即发布：v2.0.0 -> Release v2.0.0 + FontHandler-v2.0.0.exe
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '手动发布时使用的版本号，例如 v2.0.0'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建 Windows 免安装版
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = '${{ github.event.inputs.tag || github.ref }}'
+          $tag = $ref -replace '^refs/tags/', ''
+          if ($tag -notmatch '^v\d+\.\d+\.\d+') {
+            throw "版本号格式应为 vX.Y.Z，实际为：$tag"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "number=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+
+      - name: 安装 Python 与依赖
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装 PyQt6 与 PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: 运行测试
+        run: python selftest.py
+
+      - name: 同步版本号到源码与资源文件
+        shell: pwsh
+        run: |
+          $n = '${{ steps.ver.outputs.number }}'
+          $parts = $n.Split('.')
+          (Get-Content config.py -Raw) `
+            -replace 'APP_VERSION = "[^"]+"', "APP_VERSION = `"$n`"" `
+            | Set-Content config.py -Encoding UTF8
+          $vi = Get-Content version_info.txt -Raw
+          $vi = $vi -replace '\d+,\s*\d+,\s*\d+,\s*\d+', "$($parts[0]), $($parts[1]), $($parts[2]), 0"
+          $vi = $vi -replace "'2\.0\.0'", "'$n'"
+          $vi | Set-Content version_info.txt -Encoding UTF8
+          python -c "from fonthandler import config; print('APP_VERSION =', config.APP_VERSION)"
+
+      - name: 打包单文件 exe
+        run: |
+          python -m PyInstaller FontHandler.spec --noconfirm --clean --log-level WARN
+
+      - name: 校验产物可启动
+        shell: pwsh
+        run: |
+          $exe = '.\dist\FontHandler.exe'
+          if (-not (Test-Path $exe)) { throw '未生成 exe' }
+          "体积：$([math]::Round((Get-Item $exe).Length / 1MB, 1)) MB"
+          # 单文件模式启动较慢（需解压到临时目录），给足时间
+          $p = Start-Process $exe -PassThru
+          Start-Sleep -Seconds 25
+          $p.Refresh()
+          if ($p.HasExited) { throw "打包后的程序启动即退出，退出码 $($p.ExitCode)" }
+          $title = $p.MainWindowTitle
+          if (-not $title) { throw '进程在运行但没有主窗口' }
+          "窗口标题：$title"
+          if ($title -notmatch '${{ steps.ver.outputs.number }}') {
+            throw "窗口标题未包含版本号 ${{ steps.ver.outputs.number }}"
+          }
+          Stop-Process -Id $p.Id -Force
+          "打包产物校验通过"
+
+      - name: 计算校验和
+        shell: pwsh
+        run: |
+          $n = '${{ steps.ver.outputs.number }}'
+          $hash = (Get-FileHash '.\dist\FontHandler.exe' -Algorithm SHA256).Hash
+          "FontHandler-v$n.exe  SHA256  $hash" | Out-File -FilePath 'dist\SHA256SUMS.txt' -Encoding UTF8
+          Get-Content 'dist\SHA256SUMS.txt'
+
+      - name: 创建 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $n = '${{ steps.ver.outputs.number }}'
+          $notes = @"
+          ## FontHandler $n
+
+          免安装单文件版，下载后直接运行 `FontHandler-v$n.exe`，无需预装 Python。
+
+          ### 系统要求
+          - Windows 10 / 11（x64）
+          - 修改系统字体需要管理员权限；首次运行可在状态栏点「以管理员身份重启」
+
+          ### 校验
+          \`SHA256SUMS.txt\` 提供本次产物的 SHA256。
+
+          完整说明见项目 README 与产品页：${{ github.server_url }}/${{ github.repository }}
+          "@
+          gh release create '${{ steps.ver.outputs.tag }}' `
+            'dist\FontHandler.exe#FontHandler-v' + $n + '.exe' `
+            'dist\SHA256SUMS.txt' `
+            --title "FontHandler $n" `
+            --notes $notes `
+            --verify-tag
+
+      - name: 上传构建日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            build/
+            dist/
+          retention-days: 7
