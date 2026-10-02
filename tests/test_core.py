@@ -280,6 +280,8 @@ def test_read_family_names():
 @test("gasp")
 def test_run_batch_excludes_skip_emoji_fonts():
     """run_batch must skip files listed in ``excludes`` (emoji/symbol fonts)."""
+    import tempfile
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         src = tmp / "in"
@@ -301,6 +303,8 @@ def test_run_batch_excludes_skip_emoji_fonts():
 @test("gasp")
 def test_run_batch_excludes_apply_even_with_explicit_files():
     """When ``files`` lists an excluded name, it is still skipped."""
+    import tempfile
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         src = tmp / "in"
@@ -1382,7 +1386,7 @@ def _postboot_ui_module():
 
 
 # ---------------------------------------------------------------------------
-# group: system  (the Windows 10 1809+ version gate)
+# group: system  (the version gate: recommended 1709+, minimum Win7 SP1)
 # ---------------------------------------------------------------------------
 @test("system")
 def test_system_support_gate_thresholds():
@@ -1391,26 +1395,38 @@ def test_system_support_gate_thresholds():
     if os.name != "nt":
         skip("仅 Windows 可用", "the gate refuses to guess on non-Windows hosts")
 
-    check_eq(systeminfo.MIN_SUPPORTED_BUILD, 17763,
-             "the threshold is the Windows 10 1809 build")
+    check_eq(systeminfo.RECOMMENDED_BUILD, 16299,
+             "the recommended build is Windows 10 1709")
+    check_eq(systeminfo.MIN_BUILD, 7601,
+             "the minimum build is Windows 7 SP1")
 
-    # The floor itself and everything above it (all of Windows 11) is in.
-    for build in (17763, 17764, 19045, 22000, 22631, 26100):
-        ok, reason = systeminfo.check_windows_support(build)
-        check(ok, f"build {build} must be supported (reason said: {reason!r})")
+    # Builds at or above 1709 get full support (no warning).
+    for build in (16299, 16300, 17763, 19045, 22000, 22631, 26100):
+        level, reason = systeminfo.check_windows_support(build)
+        check_eq(level, systeminfo.SUPPORT_FULL,
+                 f"build {build} must be fully supported (got {level!r}: {reason!r})")
 
-    # Windows 7 / 8 / 8.1 and the pre-1809 Windows 10 releases are out.
-    for build in (7600, 7601, 9200, 9600, 10240, 17134):
-        ok, reason = systeminfo.check_windows_support(build)
-        check(not ok, f"build {build} must be refused")
-        check("17763" in reason,
-              f"the refusal should state the required build, got {reason!r}")
+    # Builds from Win7 SP1 through pre-1709 get a warning (can run, but warned).
+    for build in (7601, 7602, 9200, 9600, 10240, 14393, 15063, 16299 - 1):
+        level, reason = systeminfo.check_windows_support(build)
+        check_eq(level, systeminfo.SUPPORT_WARN,
+                 f"build {build} must be warned (got {level!r}: {reason!r})")
+        check("1709" in reason or "16299" in reason,
+              f"the warning should state the recommended build, got {reason!r}")
+
+    # Below Win7 SP1 is refused outright.
+    for build in (7600, 6001, 2600, 1):
+        level, reason = systeminfo.check_windows_support(build)
+        check_eq(level, systeminfo.SUPPORT_NONE,
+                 f"build {build} must be refused (got {level!r}: {reason!r})")
+        check("7601" in reason,
+              f"the refusal should state the minimum build, got {reason!r}")
 
     # String builds (what RtlGetVersion plumbing hands over) parse too.
-    ok, _reason = systeminfo.check_windows_support("22000")
-    check(ok, "a string build number must parse")
-    ok, _reason = systeminfo.check_windows_support(" 19045 ")
-    check(ok, "a padded string build number must parse")
+    level, _reason = systeminfo.check_windows_support("22000")
+    check_eq(level, systeminfo.SUPPORT_FULL, "a string build number must parse")
+    level, _reason = systeminfo.check_windows_support(" 19045 ")
+    check_eq(level, systeminfo.SUPPORT_FULL, "a padded string build number must parse")
 
 
 @test("system")
@@ -1421,8 +1437,9 @@ def test_system_support_gate_fails_closed_on_an_unknown_build():
         skip("仅 Windows 可用", "the gate refuses to guess on non-Windows hosts")
 
     for unknown in ("?", "", None):
-        ok, reason = systeminfo.check_windows_support(unknown)
-        check(not ok, f"an unknown build ({unknown!r}) must be refused, not guessed at")
+        level, reason = systeminfo.check_windows_support(unknown)
+        check_eq(level, systeminfo.SUPPORT_NONE,
+                 f"an unknown build ({unknown!r}) must be refused, not guessed at")
         check("无法确定" in reason or "拒绝" in reason,
               f"the refusal should say it could not determine the build: {reason!r}")
 
@@ -1435,17 +1452,25 @@ def test_system_host_info_carries_the_support_verdict():
         skip("仅 Windows 可用", "host probing is a Windows concern")
 
     info = systeminfo.get_host_info()
-    check_eq(info.supported, systeminfo.check_windows_support(info.build)[0],
-             "HostInfo.supported disagrees with check_windows_support")
-    if not info.supported:
+    level, _reason = systeminfo.check_windows_support(info.build)
+    check_eq(info.support_level, level,
+             "HostInfo.support_level disagrees with check_windows_support")
+    check_eq(info.supported, level != systeminfo.SUPPORT_NONE,
+             "HostInfo.supported must be True for both full and warn levels")
+    if info.support_level == systeminfo.SUPPORT_NONE:
         check("版本不受支持" in info.summary(),
               "the status summary must flag an unsupported build")
         check(info.support_reason, "an unsupported host must carry a reason")
+    elif info.support_level == systeminfo.SUPPORT_WARN:
+        check("1709" in info.summary() or "偏低" in info.summary(),
+              "the status summary must flag a warned build")
+        check(info.support_reason, "a warned host must carry a reason")
 
 
 @test("system")
 def test_main_refuses_to_start_on_an_unsupported_build():
     from fonthandler.ui import main_window as mw
+    from fonthandler import systeminfo
 
     _qapp()
 
@@ -1453,7 +1478,10 @@ def test_main_refuses_to_start_on_an_unsupported_build():
 
     class FakeHost:
         supported = False
-        support_reason = "需要 Windows 10 1809（内部版本 17763）或更高版本"
+        support_level = systeminfo.SUPPORT_NONE
+        support_reason = "需要 Windows 7 SP1（内部版本 7601）或更高版本"
+        windows_version = "Windows 6.1"
+        build = "7600"
 
     original_host = mw.systeminfo.get_host_info
     original_box = mw.QMessageBox.critical

@@ -8,12 +8,16 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QDockWidget,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QStatusBar,
     QTabWidget,
+    QVBoxLayout,
 )
 
 from .. import acl, backup, config, elevation, pipeline, postboot, registry, systeminfo
@@ -274,8 +278,10 @@ class FontHandlerApp(QMainWindow):
         self.log("info", f"字体目录：{self.settings.resolved_target_dir()}")
         self.log("info", f"源目录：{self.settings.resolved_source_dir()}")
         self.log("info", f"系统环境：{self.host.summary()}")
-        if not self.host.supported:
+        if self.host.support_level == systeminfo.SUPPORT_NONE:
             self.log("error", f"系统版本不受支持：{self.host.support_reason}")
+        elif self.host.support_level == systeminfo.SUPPORT_WARN:
+            self.log("warn", f"系统版本偏低：{self.host.support_reason}")
         if self.settings.is_sandbox():
             self.log("warn", "目标目录不是 C:\\Windows\\Fonts → 沙盒模式，所有破坏性操作只作用于此目录")
         if self.admin:
@@ -419,6 +425,65 @@ def _rollback_from_dialog(window, check, target_dir: Path) -> None:
     )
 
 
+def _show_version_warning(host) -> bool:
+    """Show a risk-warning dialog with a 3-second countdown gate.
+
+    The user must read the warning and wait 3 seconds before the "continue"
+    button becomes clickable.  Returns True when the user chose to continue,
+    False when they cancelled or closed the dialog.
+    """
+    dialog = QDialog()
+    dialog.setWindowTitle("系统版本警告")
+    dialog.setMinimumWidth(440)
+
+    layout = QVBoxLayout(dialog)
+
+    title = QLabel("<h3>⚠ 系统版本偏低，存在风险</h3>")
+    layout.addWidget(title)
+
+    body = QLabel(
+        f"你的系统是 {host.windows_version} (build {host.build})。\n\n"
+        f"FontHandler 建议使用 Windows 10 1709（内部版本 {systeminfo.RECOMMENDED_BUILD}）"
+        f"或更高版本。\n\n"
+        "在旧版 Windows 上，GaspHack 的渲染效果有限，且替换系统字体后可能出现"
+        "登录界面字体异常、无法进入桌面等问题。\n\n"
+        "如果你选择继续，请务必先备份系统字体（程序会自动备份），"
+        "并做好系统还原准备。"
+    )
+    body.setWordWrap(True)
+    layout.addWidget(body)
+
+    buttons = QDialogButtonBox()
+    accept = buttons.addButton("我已了解风险，继续", QDialogButtonBox.ButtonRole.AcceptRole)
+    cancel = buttons.addButton("取消", QDialogButtonBox.ButtonRole.RejectRole)
+    accept.setEnabled(False)
+
+    # The accept button stays disabled for 3 seconds so the user actually
+    # reads the warning instead of reflexively clicking through.
+    remaining = [3]
+
+    def tick() -> None:
+        remaining[0] -= 1
+        if remaining[0] <= 0:
+            accept.setText("我已了解风险，继续")
+            accept.setEnabled(True)
+            countdown_timer.stop()
+        else:
+            accept.setText(f"请阅读警告 ({remaining[0]}s)")
+
+    accept.setText(f"请阅读警告 ({remaining[0]}s)")
+    countdown_timer = QTimer(dialog)
+    countdown_timer.setInterval(1000)
+    countdown_timer.timeout.connect(tick)
+    countdown_timer.start(1000)
+
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+
+    return dialog.exec() == QDialog.DialogCode.Accepted
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     reboot_check = "--reboot-check" in argv
@@ -429,17 +494,20 @@ def main(argv: list[str] | None = None) -> int:
     # The version gate runs before anything else: before the single-instance
     # guard, before the window, and before the reboot check -- there is no safe
     # "best effort" mode on a system whose logon screen this tool might break.
-    # Windows 7 / 8 / 8.1 and pre-1809 Windows 10 get a clear refusal.
     host = systeminfo.get_host_info()
-    if not host.supported:
+    if host.support_level == systeminfo.SUPPORT_NONE:
         QMessageBox.critical(
             None,
             "系统版本不受支持",
             "FontHandler 无法在此系统上运行。\n\n"
             f"{host.support_reason}\n\n"
-            "请升级到 Windows 10 1809（内部版本 17763）或更高版本 / Windows 11 后再使用。",
+            f"请升级到 Windows 10 1709（内部版本 {systeminfo.RECOMMENDED_BUILD}）"
+            f"或更高版本后再使用。",
         )
         return 1
+    if host.support_level == systeminfo.SUPPORT_WARN:
+        if not _show_version_warning(host):
+            return 1
 
     guard = SingleInstance(APP_KEY)
     if not guard.claim():

@@ -12,16 +12,27 @@ from pathlib import Path
 from .config import SYSTEM_FONTS_DIR, USER_DATA_DIR
 
 __all__ = ["HostInfo", "get_host_info", "check_windows_support",
-           "MIN_SUPPORTED_BUILD"]
+           "RECOMMENDED_BUILD", "MIN_BUILD",
+           "SUPPORT_FULL", "SUPPORT_WARN", "SUPPORT_NONE"]
 
 
-#: Windows 10 1809 (Redstone 5).  Older builds -- including every Windows 7
-#: and 8/8.1 machine -- are refused outright: the FontCache service set, the
-#: reboot-rename-queue semantics and the TrustedInstaller workflows this tool
-#: drives are the Win10 1809+ / Win11 ones, and "probably works" is not an
-#: acceptable answer for a tool that replaces the fonts the logon screen
-#: renders with.
-MIN_SUPPORTED_BUILD = 17763
+#: Windows 10 1709 (Fall Creators Update, build 16299).  At this point GDI
+#: font rendering was rewritten to support full X/Y-axis anti-aliasing under
+#: ClearType, which is where the GaspHack technique produces the best results.
+#: Builds at or above this number get the full, no-warning experience.
+RECOMMENDED_BUILD = 16299
+
+#: Windows 7 SP1 (build 7601).  This is the absolute floor: the FontCache
+#: service, PendingFileRenameOperations semantics and TrustedInstaller ACL
+#: workflows this tool drives all exist on Win7 SP1, but GDI rendering is
+#: older and GaspHack results are noticeably worse.  The user is warned and
+#: must wait through a 3-second countdown before proceeding.
+MIN_BUILD = 7601
+
+# Support levels returned by check_windows_support.
+SUPPORT_FULL = "full"   # >= RECOMMENDED_BUILD — no warning
+SUPPORT_WARN = "warn"   # MIN_BUILD <= build < RECOMMENDED_BUILD — warning + 3s
+SUPPORT_NONE = "none"   # < MIN_BUILD or unknown — refused
 
 
 @dataclass
@@ -38,40 +49,53 @@ class HostInfo:
     support_reason: str = ""
     python: str = sys.version.split()[0]
     caveat: str = field(default="")
+    #: Three-level support verdict: "full" | "warn" | "none".
+    support_level: str = SUPPORT_FULL
 
     def summary(self) -> str:
         if not self.is_windows:
             return f"非 Windows 平台 ({platform.platform()})"
         text = f"{self.windows_version} (build {self.build}) · {self.architecture}"
-        if not self.supported:
+        if self.support_level == SUPPORT_NONE:
             text += " · 版本不受支持"
+        elif self.support_level == SUPPORT_WARN:
+            text += " · 版本偏低（建议 1709+）"
         return text
 
 
-def check_windows_support(build: str | int | None) -> tuple[bool, str]:
-    """(supported, reason) for the running Windows build.
+def check_windows_support(build: str | int | None) -> tuple[str, str]:
+    """(support_level, reason) for the running Windows build.
 
-    Requires Windows 10 1809 (build 17763) or later, which covers every
-    Windows 11 build (22000+).  Windows 7 / 8 / 8.1 and the early Windows 10
-    releases all fall below the threshold and are refused.
+    Three outcomes:
 
-    A build that cannot be determined is refused too: this gate runs before
-    anything touches ``C:\\Windows\\Fonts``, and proceeding on "unknown" would
-    turn the gate into decoration.  Non-Windows platforms (development /
-    sandbox) are accepted -- nothing there can reach the system paths.
+    * ``SUPPORT_FULL`` — Windows 10 1709 (build 16299) or later, including all
+      Windows 11 builds (22000+).  No warning.
+    * ``SUPPORT_WARN`` — Windows 7 SP1 (build 7601) through pre-1709 builds.
+      The application can run, but the user is warned about rendering quality
+      and must wait through a 3-second countdown before proceeding.
+    * ``SUPPORT_NONE`` — below Windows 7 SP1, or a build that cannot be
+      determined.  The application refuses to start.
+
+    Non-Windows platforms (development / sandbox) always get ``SUPPORT_FULL``
+    -- nothing there can reach the system paths.
     """
     if os.name != "nt":
-        return True, ""
+        return SUPPORT_FULL, ""
     try:
         number = int(str(build).strip())
     except (TypeError, ValueError):
-        return False, f"无法确定 Windows 内部版本号（build={build!r}），已拒绝运行"
-    if number < MIN_SUPPORTED_BUILD:
-        return False, (
-            f"需要 Windows 10 1809（内部版本 {MIN_SUPPORTED_BUILD}）"
-            f"或更高版本 / Windows 11，当前为 build {number}"
+        return SUPPORT_NONE, f"无法确定 Windows 内部版本号（build={build!r}），已拒绝运行"
+    if number < MIN_BUILD:
+        return SUPPORT_NONE, (
+            f"需要 Windows 7 SP1（内部版本 {MIN_BUILD}）或更高版本，当前为 build {number}"
         )
-    return True, ""
+    if number < RECOMMENDED_BUILD:
+        return SUPPORT_WARN, (
+            f"建议使用 Windows 10 1709（内部版本 {RECOMMENDED_BUILD}）或更高版本，"
+            f"当前为 build {number}。GaspHack 在旧版 GDI 渲染下效果有限，"
+            f"且系统兼容性风险较高。"
+        )
+    return SUPPORT_FULL, ""
 
 
 def _windows_version() -> tuple[str, str]:
@@ -114,7 +138,7 @@ def _is_admin() -> bool:
 
 def get_host_info() -> HostInfo:
     version, build = _windows_version()
-    supported, reason = check_windows_support(build)
+    level, reason = check_windows_support(build)
     fonts_dir = Path(SYSTEM_FONTS_DIR)
     return HostInfo(
         windows_version=version,
@@ -125,6 +149,7 @@ def get_host_info() -> HostInfo:
         fonts_dir_exists=fonts_dir.is_dir(),
         user_fonts_dir=str(USER_DATA_DIR),
         is_windows=os.name == "nt",
-        supported=supported,
+        supported=level != SUPPORT_NONE,
         support_reason=reason,
+        support_level=level,
     )
