@@ -219,14 +219,15 @@ class ReplacePage(BasePage):
         queued = sum(1 for r in results if r.status is ReplaceStatus.QUEUED)
         skipped = sum(1 for r in results if r.status.is_skip)
         failed = sum(1 for r in results if r.status is ReplaceStatus.FAILED)
-        if ctx.settings.purge_font_cache and not ctx.is_sandbox:
-            try:
-                from .. import fontcache
-
-                fontcache.clear_font_cache()
-                handle.log("info", "已清理字体缓存")
-            except Exception as exc:  # noqa: BLE001
-                handle.log("warn", f"清理字体缓存失败：{exc}")
+        # The purge (and whether the cache service may restart right away) is
+        # decided from the results: a font still in the reboot queue only lands
+        # on disk during the next boot, so restarting the service now would
+        # rebuild the cache from the old files.
+        pipeline.purge_cache_after_replace(
+            results, log=handle.log,
+            purge_enabled=ctx.settings.purge_font_cache,
+            is_sandbox=ctx.is_sandbox,
+        )
         if ctx.settings.notify_font_change and not ctx.is_sandbox:
             try:
                 from .. import livefont

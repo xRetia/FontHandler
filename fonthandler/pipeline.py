@@ -14,10 +14,11 @@ from typing import Callable, Iterable
 from . import acl, backup as backup_mod, config, gasp, registry, replace, session
 from .config import Settings
 from .gasp import CancellationToken, Cancelled
-from .replace import ReplaceEngine, ReplaceOptions, ReplaceResult
+from .replace import ReplaceEngine, ReplaceOptions, ReplaceResult, ReplaceStatus
 
 __all__ = ["PipelineContext", "default_context", "generate_gasp",
            "scan_targets", "run_replace", "run_backup", "run_restore",
+           "purge_cache_after_replace",
            "list_pending", "clear_pending", "scan_acl"]
 
 
@@ -251,6 +252,42 @@ def _schedule_post_reboot_check(ctx: PipelineContext,
         ctx.log("info", "已安排下次登录时的自动字体缓存清理与权限自检")
     except Exception as exc:  # noqa: BLE001 - autostart is best-effort
         ctx.log("warn", f"无法安排重启后自检：{exc}")
+
+
+def purge_cache_after_replace(
+    results: list[ReplaceResult],
+    log: Callable[[str, str], None] | None = None,
+    purge_enabled: bool = True,
+    is_sandbox: bool = False,
+) -> bool:
+    """Purge the Windows font cache after a replace (or restore) batch.
+
+    The cache service is restarted only when nothing went into the reboot
+    queue.  A queued font only lands on disk during the next boot, so
+    restarting the service right away makes it rebuild the cache from the
+    *old* files still on disk -- and the freshly rebuilt cache is then wrong
+    for every queued font.  Leaving the service stopped lets it start during
+    the next boot, after the queued renames have been applied.
+
+    Returns True when the purge actually ran.
+    """
+    from . import fontcache
+
+    emit = log or (lambda level, msg: None)
+    if not purge_enabled or is_sandbox:
+        return False
+    queued = sum(1 for r in results if r.status is ReplaceStatus.QUEUED)
+    try:
+        fontcache.clear_font_cache(restart_service=queued == 0)
+    except Exception as exc:  # noqa: BLE001
+        emit("warn", f"清理字体缓存失败：{exc}")
+        return False
+    if queued:
+        emit("info",
+             f"已清理字体缓存（{queued} 个字体在重启队列中，缓存服务保持停止，下次开机时生效）")
+    else:
+        emit("info", "已清理字体缓存")
+    return True
 
 
 # ---------------------------------------------------------------------------

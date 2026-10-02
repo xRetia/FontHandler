@@ -930,6 +930,73 @@ def test_clear_pending_only_removes_ours():
         sb.cleanup()
 
 
+@test("pipeline")
+def test_cache_service_is_not_restarted_while_renames_are_queued():
+    """A queued font only lands on disk at the next boot.
+
+    Restarting the cache service right after purging makes it rebuild the
+    cache from the *old* files still on disk, so the freshly rebuilt cache is
+    wrong for every queued font.  The purge helper therefore keeps the service
+    stopped until the renames have been applied.
+    """
+    from fonthandler import fontcache
+
+    calls: list[bool] = []
+    real_clear = fontcache.clear_font_cache
+
+    def spy_clear(restart_service: bool = True) -> bool:
+        calls.append(restart_service)
+        return True
+
+    fontcache.clear_font_cache = spy_clear
+    try:
+        hot = [replace.ReplaceResult("msyi.ttf", replace.ReplaceStatus.HOT)]
+        queued = [replace.ReplaceResult("msyh.ttc", replace.ReplaceStatus.QUEUED)]
+        mixed = hot + queued
+
+        check(pipeline.purge_cache_after_replace(hot), "the purge should run")
+        check_eq(calls, [True], "with nothing queued the service may restart")
+
+        calls.clear()
+        check(pipeline.purge_cache_after_replace(mixed), "the purge should run")
+        check_eq(calls, [False],
+                 "a pending reboot rename must keep the cache service stopped")
+
+        calls.clear()
+        check(not pipeline.purge_cache_after_replace(mixed, is_sandbox=True),
+              "a sandbox run must not purge the real cache")
+        check_eq(calls, [], "the sandbox purge reached the real font cache")
+
+        calls.clear()
+        check(not pipeline.purge_cache_after_replace(mixed, purge_enabled=False),
+              "a disabled purge must be a no-op")
+        check_eq(calls, [], "a disabled purge still touched the font cache")
+    finally:
+        fontcache.clear_font_cache = real_clear
+
+
+@test("pipeline")
+def test_cache_purge_failure_is_reported_not_raised():
+    from fonthandler import fontcache
+
+    logs: list[tuple[str, str]] = []
+
+    def boom(restart_service: bool = True) -> bool:
+        raise OSError("service refused")
+
+    real_clear = fontcache.clear_font_cache
+    fontcache.clear_font_cache = boom
+    try:
+        hot = [replace.ReplaceResult("msyi.ttf", replace.ReplaceStatus.HOT)]
+        check(not pipeline.purge_cache_after_replace(hot, log=lambda lv, m: logs.append((lv, m))),
+              "a failing purge must not report success")
+        check_eq(len(logs), 1, "the failure should be logged exactly once")
+        check("清理字体缓存失败" in logs[0][1],
+              f"the log line should say what failed: {logs[0]!r}")
+    finally:
+        fontcache.clear_font_cache = real_clear
+
+
 # ---------------------------------------------------------------------------
 # group: postboot
 # ---------------------------------------------------------------------------
