@@ -22,9 +22,25 @@ def _asset_url(name: str) -> str:
     (``sys._MEIPASS``), so the stylesheet finds the image in a frozen build
     too.  Without this the tick silently degrades to a solid block and nobody
     finds out until someone runs the exe.
+
+    The spec collects the assets as ``("fonthandler/ui/assets",
+    "fonthandler/ui/assets")`` -- i.e. the package tree keeps its shape inside
+    the bundle and the image lands at ``_MEIPASS/fonthandler/ui/assets/``.
+    Pointing at ``_MEIPASS/assets/`` misses it, which is precisely how the
+    "tick turns into a block in the exe only" bug survived a fix: the CI check
+    looked at the location the spec writes while the QSS read another.  Both
+    layouts are probed, and the one the spec writes wins when neither exists
+    so the generated URL always describes the intended bundle layout.
     """
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    return (base / "assets" / name).as_posix()
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        spec_layout = Path(meipass) / "fonthandler" / "ui" / "assets"
+        flat_layout = Path(meipass) / "assets"
+        for base in (spec_layout, flat_layout):
+            if (base / name).is_file():
+                return (base / name).as_posix()
+        return (spec_layout / name).as_posix()
+    return (Path(__file__).resolve().parent / "assets" / name).as_posix()
 
 COLORS = {
     "bg": "#1e1f22",

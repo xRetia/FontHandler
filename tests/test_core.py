@@ -1602,6 +1602,63 @@ def test_ui_checkbox_draws_a_tick_when_checked():
     check_eq(tick_pixels(True, False), 0, "a disabled box must not show a tick")
 
 
+@test("ui")
+def test_ui_asset_url_matches_the_bundled_layout():
+    """The stylesheet must look where the spec actually puts the assets.
+
+    The spec collects ``fonthandler/ui/assets`` under the same relative path,
+    so in a frozen build the tick lives at
+    ``_MEIPASS/fonthandler/ui/assets/check.png``.  Resolving it against
+    ``_MEIPASS/assets/`` misses the file and the checkbox tick silently
+    degrades to a solid block -- only in the exe, never from source, which is
+    exactly why the earlier fix passed CI (the resource check and the QSS
+    disagreed about the layout) while the bug stayed.
+    """
+    import tempfile
+
+    from fonthandler.ui import style
+
+    had_meipass = hasattr(sys, "_MEIPASS")
+    saved_meipass = getattr(sys, "_MEIPASS", None)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # Layout the spec writes: the package tree keeps its shape.
+            bundled = Path(tmp) / "fonthandler" / "ui" / "assets"
+            bundled.mkdir(parents=True, exist_ok=True)
+            (bundled / "check.png").write_bytes(b"png")
+            sys._MEIPASS = tmp
+            check_eq(style._asset_url("check.png"), (bundled / "check.png").as_posix(),
+                     "the QSS asset URL does not match the layout the spec bundles")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # The flat layout is still honoured when it is what is on disk.
+            flat = Path(tmp) / "assets"
+            flat.mkdir(parents=True, exist_ok=True)
+            (flat / "check.png").write_bytes(b"png")
+            sys._MEIPASS = tmp
+            check_eq(style._asset_url("check.png"), (flat / "check.png").as_posix(),
+                     "a flat assets layout was not honoured when present")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Nothing extracted at all: fall back to the spec's layout so the
+            # generated URL always describes the intended bundle shape.
+            sys._MEIPASS = tmp
+            expected = (Path(tmp) / "fonthandler" / "ui" / "assets" / "check.png").as_posix()
+            check_eq(style._asset_url("check.png"), expected,
+                     "the fallback should point at the layout the spec writes")
+    finally:
+        if had_meipass:
+            sys._MEIPASS = saved_meipass
+        else:
+            del sys._MEIPASS
+
+    # From source: the asset sits next to this very module.
+    dev = Path(style.__file__).resolve().parent / "assets" / "check.png"
+    check_eq(style._asset_url("check.png"), dev.as_posix(),
+             "the source-tree asset path was rewritten")
+    check(dev.is_file(), f"check.png is missing from the source tree: {dev}")
+
+
 def test_run_detach_console_leaves_stdin_spawnable():
     """A detached console must not break child processes.
 
