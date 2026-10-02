@@ -29,7 +29,7 @@ python run.py
 
 免安装版：在 [Releases](https://github.com/xRetia/FontHandler/releases) 下载 `FontHandler-v2.0.0.exe`，直接运行即可。随包附带 `SHA256SUMS.txt` 用于校验完整性。
 
-源码运行需要 Windows 10/11 和 Python 3.10 或更高版本：
+源码运行需要 **Windows 10 1809（内部版本 17763）或更高版本 / Windows 11**，以及 Python 3.10 或更高版本。不支持 Windows 7 / 8 / 8.1 及更早的 Windows 10 版本，启动时会直接拒绝运行。
 
 ```bash
 pip install -r requirements.txt

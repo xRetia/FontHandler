@@ -269,10 +269,13 @@ class FontHandlerApp(QMainWindow):
         run_post_reboot_check(self)
 
     def _log_startup(self) -> None:
-        self.log("info", "FontHandler 2.0.0 启动")
+        self.log("info", f"FontHandler {config.APP_VERSION} 启动")
         self.log("info", f"工作目录：{config.APP_HOME}")
         self.log("info", f"字体目录：{self.settings.resolved_target_dir()}")
         self.log("info", f"源目录：{self.settings.resolved_source_dir()}")
+        self.log("info", f"系统环境：{self.host.summary()}")
+        if not self.host.supported:
+            self.log("error", f"系统版本不受支持：{self.host.support_reason}")
         if self.settings.is_sandbox():
             self.log("warn", "目标目录不是 C:\\Windows\\Fonts → 沙盒模式，所有破坏性操作只作用于此目录")
         if self.admin:
@@ -403,9 +406,11 @@ def _rollback_from_dialog(window, check, target_dir: Path) -> None:
     ctx.log = window.log
     results = pipeline.run_restore(ctx, package)
     failed = sum(1 for r in results if not r.ok)
-    from .. import fontcache
-
-    fontcache.clear_font_cache()
+    # Restores can land in the reboot queue too (the font was locked).  The
+    # purge helper keeps the cache service down when renames are still pending:
+    # restarting it now would rebuild the cache from the broken files still on
+    # disk, and the next boot would apply the restore onto a stale cache.
+    pipeline.purge_cache_after_replace(results, log=window.log)
     QMessageBox.information(
         window,
         "还原完成",
@@ -420,6 +425,21 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv)
     apply_style(app)
+
+    # The version gate runs before anything else: before the single-instance
+    # guard, before the window, and before the reboot check -- there is no safe
+    # "best effort" mode on a system whose logon screen this tool might break.
+    # Windows 7 / 8 / 8.1 and pre-1809 Windows 10 get a clear refusal.
+    host = systeminfo.get_host_info()
+    if not host.supported:
+        QMessageBox.critical(
+            None,
+            "系统版本不受支持",
+            "FontHandler 无法在此系统上运行。\n\n"
+            f"{host.support_reason}\n\n"
+            "请升级到 Windows 10 1809（内部版本 17763）或更高版本 / Windows 11 后再使用。",
+        )
+        return 1
 
     guard = SingleInstance(APP_KEY)
     if not guard.claim():

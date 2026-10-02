@@ -1196,6 +1196,99 @@ def _postboot_ui_module():
 
 
 # ---------------------------------------------------------------------------
+# group: system  (the Windows 10 1809+ version gate)
+# ---------------------------------------------------------------------------
+@test("system")
+def test_system_support_gate_thresholds():
+    from fonthandler import systeminfo
+
+    if os.name != "nt":
+        skip("仅 Windows 可用", "the gate refuses to guess on non-Windows hosts")
+
+    check_eq(systeminfo.MIN_SUPPORTED_BUILD, 17763,
+             "the threshold is the Windows 10 1809 build")
+
+    # The floor itself and everything above it (all of Windows 11) is in.
+    for build in (17763, 17764, 19045, 22000, 22631, 26100):
+        ok, reason = systeminfo.check_windows_support(build)
+        check(ok, f"build {build} must be supported (reason said: {reason!r})")
+
+    # Windows 7 / 8 / 8.1 and the pre-1809 Windows 10 releases are out.
+    for build in (7600, 7601, 9200, 9600, 10240, 17134):
+        ok, reason = systeminfo.check_windows_support(build)
+        check(not ok, f"build {build} must be refused")
+        check("17763" in reason,
+              f"the refusal should state the required build, got {reason!r}")
+
+    # String builds (what RtlGetVersion plumbing hands over) parse too.
+    ok, _reason = systeminfo.check_windows_support("22000")
+    check(ok, "a string build number must parse")
+    ok, _reason = systeminfo.check_windows_support(" 19045 ")
+    check(ok, "a padded string build number must parse")
+
+
+@test("system")
+def test_system_support_gate_fails_closed_on_an_unknown_build():
+    from fonthandler import systeminfo
+
+    if os.name != "nt":
+        skip("仅 Windows 可用", "the gate refuses to guess on non-Windows hosts")
+
+    for unknown in ("?", "", None):
+        ok, reason = systeminfo.check_windows_support(unknown)
+        check(not ok, f"an unknown build ({unknown!r}) must be refused, not guessed at")
+        check("无法确定" in reason or "拒绝" in reason,
+              f"the refusal should say it could not determine the build: {reason!r}")
+
+
+@test("system")
+def test_system_host_info_carries_the_support_verdict():
+    from fonthandler import systeminfo
+
+    if os.name != "nt":
+        skip("仅 Windows 可用", "host probing is a Windows concern")
+
+    info = systeminfo.get_host_info()
+    check_eq(info.supported, systeminfo.check_windows_support(info.build)[0],
+             "HostInfo.supported disagrees with check_windows_support")
+    if not info.supported:
+        check("版本不受支持" in info.summary(),
+              "the status summary must flag an unsupported build")
+        check(info.support_reason, "an unsupported host must carry a reason")
+
+
+@test("system")
+def test_main_refuses_to_start_on_an_unsupported_build():
+    from fonthandler.ui import main_window as mw
+
+    _qapp()
+
+    shown: list[tuple] = []
+
+    class FakeHost:
+        supported = False
+        support_reason = "需要 Windows 10 1809（内部版本 17763）或更高版本"
+
+    original_host = mw.systeminfo.get_host_info
+    original_box = mw.QMessageBox.critical
+    original_app = mw.QApplication
+    mw.systeminfo.get_host_info = lambda: FakeHost()
+    mw.QMessageBox.critical = lambda *a, **k: (shown.append(a), 16384)[1]
+    mw.QApplication = lambda *a, **k: _qapp()
+    try:
+        # The gate sits before the single-instance guard, so no guard is
+        # claimed and nothing can leak into later tests.
+        code = mw.main(["run.py"])
+    finally:
+        mw.systeminfo.get_host_info = original_host
+        mw.QMessageBox.critical = original_box
+        mw.QApplication = original_app
+
+    check_eq(code, 1, "main() must refuse to start on an unsupported build")
+    check_eq(len(shown), 1, "the refusal dialog must be shown exactly once")
+
+
+# ---------------------------------------------------------------------------
 # group: ui  (headless, offscreen Qt)
 # ---------------------------------------------------------------------------
 _APP = None
