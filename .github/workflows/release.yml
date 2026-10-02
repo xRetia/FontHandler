@@ -136,16 +136,35 @@ jobs:
           $notes = @"
           ## FontHandler $n
 
-          免安装单文件版，下载后直接运行 `FontHandler-v$n.exe`，无需预装 Python。
+          让 Windows 字体看着更舒畅。基于 GaspHack 技术，通过优化字体渲染参数让文字显示更清晰，无需安装，下载即用。
+
+          ### 下载后怎么用
+
+          1. 下载 `FontHandler-v$n.exe`，双击运行
+          2. 点状态栏的「以管理员身份重启」授权（修改系统字体必须管理员权限）
+          3. 在 GaspHack 页面生成补丁字体，然后到「替换字体」页面一键替换
+          4. 如果有文件被占用，重启后自动生效
 
           ### 系统要求
-          - Windows 10 1809（内部版本 17763）或更高版本 / Windows 11（x64）；不支持 Windows 7 / 8 / 8.1
-          - 修改系统字体需要管理员权限；首次运行可在状态栏点「以管理员身份重启」
 
-          ### 校验
-          \`SHA256SUMS.txt\` 提供本次产物的 SHA256。
+          - Windows 7 SP1 及以上（推荐 Windows 10 1709+ / Windows 11）
+          - 旧系统会弹出风险提示，确认后仍可使用，但效果可能有限
+          - 需要管理员权限才能修改系统字体
 
-          完整说明见项目 README 与产品页：${{ github.server_url }}/${{ github.repository }}
+          ### 这个版本有什么新东西
+
+          - 全新产品主页，带壁纸背景和特性展示
+          - 排除 emoji 字体文件，避免影响表情符号显示
+          - 放宽系统版本门槛：Win7 SP1 即可运行（带风险提示），推荐 Win10 1709+
+          - 应用图标更新
+
+          ### 安全校验
+
+          \`SHA256SUMS.txt\` 提供本次下载文件的 SHA256 校验值，可用来验证文件完整性。
+
+          ### 遇到问题？
+
+          替换后如果登录界面字体异常，正常登录后打开 FontHandler，在弹出的提示里点「从备份还原」即可恢复。完整说明见 [产品主页](${{ github.server_url }}/${{ github.repository }}) 和 README。
           "@
 
           foreach ($f in 'dist\FontHandler.exe', 'dist\SHA256SUMS.txt') {

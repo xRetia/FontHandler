@@ -1,6 +1,6 @@
 # FontHandler 2.0 (PyQt6)
 
-Windows 字体 GaspHack 工具，让 Windows 原生渲染出类似 MacType 的效果，并且具有不错的兼容性。
+让 Windows 字体看着更舒畅。FontHandler 基于 GaspHack 技术，让 Windows 原生渲染出类似 MacType 的清晰效果，并且具有不错的兼容性。
 
 FontHandler 用 PyQt6 编写，提供图形界面来完成整套操作：
 
@@ -27,9 +27,9 @@ python run.py
 
 ## 安装与运行
 
-免安装版：在 [Releases](https://github.com/xRetia/FontHandler/releases) 下载 `FontHandler-v2.0.0.exe`，直接运行即可。随包附带 `SHA256SUMS.txt` 用于校验完整性。
+免安装版：在 [Releases](https://github.com/xRetia/FontHandler/releases) 下载 `FontHandler.exe`，直接运行即可。随包附带 `SHA256SUMS.txt` 用于校验完整性。
 
-源码运行需要 **Windows 10 1809（内部版本 17763）或更高版本 / Windows 11**，以及 Python 3.10 或更高版本。不支持 Windows 7 / 8 / 8.1 及更早的 Windows 10 版本，启动时会直接拒绝运行。
+源码运行需要 **Windows 7 SP1 或更高版本**（推荐 Windows 10 1709+ / Windows 11），以及 Python 3.10 或更高版本。在低于 Windows 10 1709 的系统上运行时，程序会弹出风险警告，确认后仍可使用。
 
 ```bash
 pip install -r requirements.txt
