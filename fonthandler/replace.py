@@ -339,12 +339,39 @@ class ReplaceEngine:
         except Exception as exc:  # noqa: BLE001 - never block a replace on this
             self.log("warn", f"{name}: 无法读取原权限 ({exc})")
 
+        # Take over the target's security before touching it.  System fonts
+        # carry a protected DACL where even SYSTEM has only RX, so without
+        # this step the hot replace fails with access denied -- and the
+        # reboot rename queue, which smss executes as SYSTEM, is silently
+        # dropped at boot while the .new file stays behind.  Fail closed:
+        # a replace we cannot arm is reported as failed, never queued.
+        took_over = False
+        try:
+            acl.take_over_for_replace(dst, self._security())
+            took_over = True
+        except Exception as exc:  # noqa: BLE001
+            self.log("error", f"{name}: 接管目标文件权限失败，已中止 ({exc})")
+            return ReplaceResult(
+                name, ReplaceStatus.FAILED,
+                f"无法接管目标文件权限（{exc}）；"
+                "热替换与重启队列都需要对旧文件的删除权限",
+                acl_snapshot=snap,
+            )
+
+        def _restore_target_acl() -> None:
+            if took_over and snap is not None:
+                try:
+                    acl.restore(snap, self._security())
+                except Exception as exc:  # noqa: BLE001
+                    self.log("warn", f"{name}: 恢复原权限失败 ({exc})")
+
         # Stage next to the target so it inherits the Fonts directory DACL.
         try:
             if self.ops.exists(staged):
                 self.ops.unlink(staged)
             self.ops.copy(src, staged)
         except OSError as exc:
+            _restore_target_acl()
             return ReplaceResult(name, ReplaceStatus.FAILED, f"写入 {staged.name} 失败: {exc}",
                                  acl_snapshot=snap)
 
@@ -361,6 +388,7 @@ class ReplaceEngine:
             except Exception as exc:  # noqa: BLE001
                 self.log("error", f"{name}: 设置 TrustedInstaller 所有者失败，已中止该字体 ({exc})")
                 self.ops.unlink(staged)
+                _restore_target_acl()
                 return ReplaceResult(
                     name, ReplaceStatus.FAILED,
                     f"无法设置 TrustedInstaller 所有者，已中止替换（{exc}）",
@@ -378,10 +406,15 @@ class ReplaceEngine:
         except OSError as exc:
             if not opts.queue_on_lock:
                 self.ops.unlink(staged)
+                _restore_target_acl()
                 return ReplaceResult(name, ReplaceStatus.FAILED, f"热替换失败: {exc}",
                                      staged=staged, acl_snapshot=snap)
 
-        # Fall back to the reboot queue.
+        # Fall back to the reboot queue.  The takeover taken above is
+        # deliberately *kept*: smss runs the queued rename as SYSTEM, and the
+        # grant is what lets it delete the old font.  The post-boot check
+        # then sees the staged file (owner TrustedInstaller) in place of the
+        # taken-over one, so nothing is left to hand back.
         try:
             self.ops.queue_for_reboot(staged, dst)
             if self.registry is not None:
@@ -394,6 +427,7 @@ class ReplaceEngine:
                                  size=self.ops.stat_size(src))
         except Exception as exc:  # noqa: BLE001
             self.ops.unlink(staged)
+            _restore_target_acl()
             return ReplaceResult(name, ReplaceStatus.FAILED, f"排入重启队列失败: {exc}",
                                  acl_snapshot=snap)
 

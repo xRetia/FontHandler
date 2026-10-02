@@ -27,6 +27,8 @@ from .config import TI_SID
 
 __all__ = [
     "TI_SID",
+    "ADMIN_GROUP_SID",
+    "TAKEOVER_ACES",
     "AclError",
     "AclSnapshot",
     "SecurityBackend",
@@ -39,6 +41,7 @@ __all__ = [
     "get_sddl",
     "apply_sddl",
     "set_owner_ti",
+    "take_over_for_replace",
     "reset_to_inherited",
     "snapshot",
     "restore",
@@ -46,6 +49,16 @@ __all__ = [
     "run_hidden",
     "console_encoding",
 ]
+
+
+#: BUILTIN\Administrators.  A full SID (not the SDDL alias ``BA``) because
+#: :meth:`SecurityBackend.set_owner` feeds it to ``ConvertStringSidToSidW``.
+ADMIN_GROUP_SID = "S-1-5-32-544"
+
+#: ACEs appended by :func:`take_over_for_replace`: full control for
+#: Administrators and for SYSTEM.  SYSTEM is the one that matters most -- the
+#: reboot rename queue is executed by smss in the SYSTEM context.
+TAKEOVER_ACES = "(A;;FA;;;BA)(A;;FA;;;SY)"
 
 
 class AclError(RuntimeError):
@@ -185,6 +198,11 @@ class SandboxSecurityBackend(SecurityBackend):
         #: process does not own, which is exactly what the sandbox cannot
         #: reproduce on its own.
         self.fail_set_owner: bool = False
+        #: Restrict ``fail_set_owner`` to a single SID (e.g. ``TI_SID``): the
+        #: takeover of the old file (owner -> Administrators) then succeeds
+        #: while handing the staged file to TrustedInstaller still fails, so
+        #: tests can exercise each failure separately.
+        self.fail_set_owner_sid: str | None = None
 
     def is_admin(self) -> bool:
         return True
@@ -203,7 +221,9 @@ class SandboxSecurityBackend(SecurityBackend):
         return self.sddls.get(self._key(path), "O:BAG:SYD:PAI(A;OICI;FA;;;SY)")
 
     def set_owner(self, path: Path, sid: str) -> None:
-        if self.fail_set_owner:
+        if self.fail_set_owner and (
+            self.fail_set_owner_sid is None or sid == self.fail_set_owner_sid
+        ):
             raise AclError(f"simulated SetNamedSecurityInfoW failure on {path}")
         self.owners[self._key(path)] = sid
 
@@ -676,6 +696,52 @@ def apply_sddl(path: Path, sddl: str, backend: SecurityBackend | None = None) ->
 def reset_to_inherited(path: Path, backend: SecurityBackend | None = None) -> None:
     """Re-inherit the parent DACL -- removes redundant explicit ACEs."""
     (backend or get_backend()).reset_inherited(Path(path))
+
+
+def take_over_for_replace(path: Path, backend: SecurityBackend | None = None) -> str:
+    """Take ownership of a protected file and grant Administrators/SYSTEM full control.
+
+    System fonts carry an explicit protected DACL in which *even SYSTEM* has
+    only read+execute -- no DELETE.  Two things break without this step:
+
+    * the hot replace fails with ``ACCESS_DENIED`` (the process runs as an
+      administrator, not as TrustedInstaller), and
+    * far worse, the reboot rename queue is executed by ``smss`` in the
+      SYSTEM context: a queued rename whose target SYSTEM cannot delete is
+      silently dropped at boot, the queue is consumed anyway, and the staged
+      ``.new`` file is left behind while the font stays unpatched.  That is
+      exactly the "重启后没生效、.new 还在" trap.
+
+    Ownership is taken first (``SeTakeOwnershipPrivilege``), because rewriting
+    somebody else's DACL needs WRITE_DAC, which an RX-only entry does not
+    grant.  The caller snapshots the original descriptor beforehand and
+    restores it when the replacement fails; when the replacement succeeds the
+    file on disk is the staged one, which never carried the takeover.
+
+    Returns the SDDL that was applied (for logging).
+    """
+    be = backend or get_backend()
+    path = Path(path)
+    # Taking ownership needs the privilege; enabling it twice is harmless.
+    try:
+        be.enable_privilege("SeTakeOwnershipPrivilege")
+    except Exception:  # noqa: BLE001 - best effort, set_owner reports the real error
+        pass
+    be.set_owner(path, ADMIN_GROUP_SID)
+    current = be.get_sddl(path)
+    sections = _sddl_sections(current)
+    dacl = sections.get("D", "")
+    # Already granted (e.g. a re-run, or an inherited full-control ACE)?
+    # Appending duplicates is harmless but noisy, so skip instead.  Matching
+    # the ACE body rather than the full string keeps inherited
+    # ``(A;ID;FA;;;BA)`` counting as "already granted", which is correct:
+    # inherited full control grants delete just the same.
+    if "FA;;;BA)" in dacl and "FA;;;SY)" in dacl:
+        return current
+    owner = _sddl_owner(current) or ADMIN_GROUP_SID
+    new_sddl = f"O:{owner}D:{dacl}{TAKEOVER_ACES}"
+    be.apply_sddl(path, new_sddl)
+    return new_sddl
 
 
 def has_explicit_ti_ace(sddl: str) -> bool:

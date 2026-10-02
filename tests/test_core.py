@@ -706,7 +706,12 @@ def test_owner_failure_aborts_the_font_instead_of_installing_it():
     try:
         sb.populate(["msyh.ttc"])
         original = (sb.fonts_dir / "msyh.ttc").read_bytes()
+        # Only handing the *staged* file to TrustedInstaller fails; the
+        # takeover of the old file (owner -> Administrators) must still work,
+        # otherwise the failure under test is the takeover's, not the
+        # TrustedInstaller handover's.
         sb.security.fail_set_owner = True
+        sb.security.fail_set_owner_sid = config.TI_SID
 
         result = sb.engine().replace_one("msyh.ttc")
 
@@ -729,6 +734,7 @@ def test_owner_failure_is_not_reported_as_success_by_the_pipeline():
     try:
         sb.populate(["msyh.ttc", "msyi.ttf"])
         sb.security.fail_set_owner = True
+        sb.security.fail_set_owner_sid = config.TI_SID
         ctx = sb.context()
 
         results = pipeline.run_replace(ctx)
@@ -756,6 +762,7 @@ def test_queue_path_also_refuses_when_the_owner_cannot_be_fixed():
         sb.populate(["msyh.ttc"])
         sb.file_ops.locked = {(sb.fonts_dir / "msyh.ttc").resolve()}
         sb.security.fail_set_owner = True
+        sb.security.fail_set_owner_sid = config.TI_SID
 
         result = sb.engine().replace_one("msyh.ttc")
 
@@ -763,6 +770,139 @@ def test_queue_path_also_refuses_when_the_owner_cannot_be_fixed():
                  "a font with an unfixable owner was queued for the reboot")
         check_eq(registry.read_pending(sb.registry), [],
                  "an unfixable font was written to PendingFileRenameOperations")
+    finally:
+        sb.cleanup()
+
+
+@test("replace")
+def test_take_over_grants_admin_and_system_full_control():
+    """``take_over_for_replace`` arms a protected file for replacement.
+
+    System fonts carry a protected DACL where even SYSTEM only has RX, so the
+    takeover must grant delete-capable access to both Administrators (the
+    running process) and SYSTEM (the context smss executes the queued rename
+    in), while keeping the original ACEs for the restore path.
+    """
+    from fonthandler import acl as acl_mod
+
+    sb = Sandbox()
+    try:
+        target = sb.add_target("msyi.ttf")
+        applied = acl_mod.take_over_for_replace(target, sb.security)
+
+        check_eq(sb.security.get_owner(target), acl_mod.ADMIN_GROUP_SID,
+                 "ownership must move to Administrators before the DACL can be rewritten")
+        check("(A;;FA;;;BA)" in applied and "(A;;FA;;;SY)" in applied,
+              f"the applied SDDL must grant Administrators and SYSTEM full control: {applied!r}")
+        live = sb.security.get_sddl(target)
+        check("(A;;FA;;;BA)" in live and "(A;;FA;;;SY)" in live,
+              "the live descriptor must carry the takeover ACEs")
+        check("(A;OICI;FA;;;SY)" in live,
+              "the original ACEs must survive the takeover for later restoration")
+
+        # Idempotent: a second takeover must not stack duplicate ACEs.
+        again = acl_mod.take_over_for_replace(target, sb.security)
+        check_eq(again.count("(A;;FA;;;BA)"), 1,
+                 "repeated takeover stacked duplicate Administrators ACEs")
+        check_eq(again.count("(A;;FA;;;SY)"), 1,
+                 "repeated takeover stacked duplicate SYSTEM ACEs")
+        check_eq(again, live, "the second takeover should leave the descriptor untouched")
+    finally:
+        sb.cleanup()
+
+
+@test("replace")
+def test_queued_rename_takes_over_the_target_first():
+    """The reboot queue must be armed before it is used.
+
+    This is the exact "重启后没生效、.new 还在" trap: the queued rename is
+    executed by smss as SYSTEM, and a font file whose protected DACL gives
+    SYSTEM only RX cannot be deleted by it.  The queue is consumed anyway,
+    the rename is silently dropped, and the staged .new file stays behind.
+    The takeover has to happen while we still own the machine interactively.
+    """
+    from fonthandler import acl as acl_mod
+
+    sb = Sandbox()
+    try:
+        sb.populate(["msyh.ttc"])
+        sb.file_ops.locked = {(sb.fonts_dir / "msyh.ttc").resolve()}
+
+        result = sb.engine().replace_one("msyh.ttc")
+
+        check_eq(result.status, replace.ReplaceStatus.QUEUED, "the locked font was not queued")
+        target = sb.fonts_dir / "msyh.ttc"
+        sddl = sb.security.get_sddl(target)
+        check("(A;;FA;;;BA)" in sddl and "(A;;FA;;;SY)" in sddl,
+              f"the queued target still cannot be deleted by SYSTEM: {sddl!r}")
+        check_eq(sb.security.get_owner(target), acl_mod.ADMIN_GROUP_SID,
+                 "the takeover must stay in place until the reboot applies the rename")
+        check_eq(len(registry.read_pending(sb.registry)), 1,
+                 "the queued rename is not in the pending registry value")
+    finally:
+        sb.cleanup()
+
+
+@test("replace")
+def test_take_over_failure_aborts_without_queueing():
+    """A target we cannot take over must fail loudly, not queue a dead rename.
+
+    Queuing a rename that smss will silently drop is worse than failing: the
+    UI reports success, the user reboots, and nothing changes.  Fail closed.
+    """
+    sb = Sandbox()
+    try:
+        sb.populate(["msyh.ttc"])
+        sb.file_ops.locked = {(sb.fonts_dir / "msyh.ttc").resolve()}
+        sb.security.fail_set_owner = True  # the takeover itself cannot happen
+
+        result = sb.engine().replace_one("msyh.ttc")
+
+        check_eq(result.status, replace.ReplaceStatus.FAILED,
+                 "a font whose target cannot be taken over was not refused")
+        check("接管" in result.message,
+              f"the failure should name the takeover, got {result.message!r}")
+        check_eq(registry.read_pending(sb.registry), [],
+                 "a dead rename was written to PendingFileRenameOperations")
+        check(not (sb.fonts_dir / "msyh.ttc.new").exists(),
+              "a staged file was left behind after the takeover failed")
+    finally:
+        sb.cleanup()
+
+
+@test("replace")
+def test_queue_failure_restores_the_target_acl():
+    """When nothing ends up queued, the takeover must be handed back.
+
+    The takeover grants Administrators/SYSTEM full control and moves the
+    owner -- state the font must not be left in when the replacement did not
+    happen at all.
+    """
+    from fonthandler import acl as acl_mod
+
+    sb = Sandbox()
+    try:
+        sb.populate(["msyi.ttf"])
+        sb.file_ops.locked = {(sb.fonts_dir / "msyi.ttf").resolve()}
+        original_sddl = sb.security.get_sddl(sb.fonts_dir / "msyi.ttf")
+
+        def boom(src, dst):
+            raise OSError("queue refused")
+
+        sb.file_ops.queue_for_reboot = boom
+        result = sb.engine().replace_one("msyi.ttf")
+
+        check_eq(result.status, replace.ReplaceStatus.FAILED,
+                 "the failed queueing was not reported as a failure")
+        restored = sb.security.get_sddl(sb.fonts_dir / "msyi.ttf")
+        check("(A;;FA;;;BA)" not in restored,
+              "the takeover ACE survived a replace that never happened")
+        check_eq(restored, original_sddl,
+                 "the original DACL was not restored after the failure")
+        check(not (sb.fonts_dir / "msyi.ttf.new").exists(),
+              "the staged file was left behind after the queueing failure")
+        check(sb.security.get_owner(sb.fonts_dir / "msyi.ttf") != acl_mod.ADMIN_GROUP_SID,
+              "the owner was left with the takeover Administrators identity")
     finally:
         sb.cleanup()
 
