@@ -62,9 +62,20 @@ def stop_font_cache_service() -> list[str]:
 
 
 def _decode(result) -> str:
+    """Render a child's output as text, whatever ``run_hidden`` returned.
+
+    ``run_hidden`` runs with ``text=True`` so ``stdout`` is already a ``str``
+    -- calling ``.decode()`` on it raised ``AttributeError``, which the
+    surrounding ``except Exception`` swallowed.  The "service refused to stop"
+    check then quietly saw nothing at all, so ``stop_font_cache_service``
+    reported every service as stopped even while the files stayed locked.
+    """
     from .acl import console_encoding
 
-    return (result.stdout or b"").decode(console_encoding(), errors="replace")
+    text = result.stdout
+    if isinstance(text, bytes):
+        return text.decode(console_encoding(), errors="replace")
+    return text or ""
 
 
 def restart_font_cache_service() -> bool:

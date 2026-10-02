@@ -1809,6 +1809,69 @@ def test_acl_font_cache_helper_is_windowless():
 
 
 @test("acl")
+def test_font_cache_stop_reports_a_service_that_stayed_up():
+    """``sc query`` output is already text; ``.decode()`` on it hid RUNNING.
+
+    ``run_hidden`` runs children with ``text=True``, so ``result.stdout`` is a
+    ``str``.  The old ``_decode`` called ``.decode()`` on it, the resulting
+    ``AttributeError`` was swallowed by the ``except Exception`` around the
+    state probe, and a cache service that refused to stop was reported as
+    stopped -- leaving the cache files locked with no warning in the log.
+    """
+    import subprocess as sp
+
+    from fonthandler import acl as acl_mod
+    from fonthandler import fontcache
+
+    if os.name != "nt":
+        skip("仅 Windows 可用", "service control is a Windows concept")
+
+    original = acl_mod.run_hidden
+    net_stops: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        cmd = list(cmd)
+        if cmd[:2] == ["net", "stop"]:
+            net_stops.append(cmd[2])
+            return sp.CompletedProcess(cmd, 0, "", None)
+        if cmd[:2] == ["sc", "query"]:
+            return sp.CompletedProcess(cmd, 0, "STATE              : 4  RUNNING", None)
+        return sp.CompletedProcess(cmd, 0, "", None)
+
+    acl_mod.run_hidden = fake_run
+    try:
+        still_running = fontcache.stop_font_cache_service()
+    finally:
+        acl_mod.run_hidden = original
+
+    check_eq(sorted(still_running), sorted(fontcache.FONT_CACHE_SERVICES),
+             "a RUNNING service was not reported as still up")
+    check_eq(sorted(net_stops), sorted(fontcache.FONT_CACHE_SERVICES),
+             "each cache service must be asked to stop first")
+
+
+@test("acl")
+def test_font_cache_decode_accepts_str_and_bytes():
+    """``_decode`` must survive both text and binary child output."""
+    import subprocess as sp
+
+    from fonthandler import fontcache
+
+    check_eq(
+        fontcache._decode(sp.CompletedProcess([], 0, "STATE: RUNNING", None)),
+        "STATE: RUNNING",
+        "a text stdout was mangled by _decode",
+    )
+    check_eq(
+        fontcache._decode(sp.CompletedProcess([], 0, b"STATE: RUNNING", None)),
+        "STATE: RUNNING",
+        "a bytes stdout was not decoded",
+    )
+    check_eq(fontcache._decode(sp.CompletedProcess([], 0, None, None)), "",
+             "a missing stdout should read as empty text")
+
+
+@test("acl")
 def test_acl_console_encoding_matches_the_oem_code_page():
     """icacls writes GBK on a Chinese install; UTF-8 turned it to mojibake."""
     import ctypes
