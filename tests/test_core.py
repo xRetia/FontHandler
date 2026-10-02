@@ -277,6 +277,45 @@ def test_read_family_names():
     check("TestSans" in names, f"family name not parsed, got {names!r}")
 
 
+@test("gasp")
+def test_run_batch_excludes_skip_emoji_fonts():
+    """run_batch must skip files listed in ``excludes`` (emoji/symbol fonts)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / "in"
+        out = tmp / "out"
+        src.mkdir()
+        # Three normal fonts + one emoji font that should be excluded.
+        for name in ("msyh.ttc", "Deng.ttf", "seguiemj.ttf"):
+            (src / name).write_bytes(build_font(name))
+        rep = gasp.run_batch(src, out, excludes=("seguiemj.ttf",))
+        names = {r.name for r in rep.results}
+        check("seguiemj.ttf" not in names,
+              "the excluded emoji font must not appear in the batch results")
+        check("msyh.ttc" in names and "Deng.ttf" in names,
+              "the non-excluded fonts must still be processed")
+        check(not (out / "seguiemj.ttf").exists(),
+              "the excluded emoji font must not be written to the output dir")
+
+
+@test("gasp")
+def test_run_batch_excludes_apply_even_with_explicit_files():
+    """When ``files`` lists an excluded name, it is still skipped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / "in"
+        out = tmp / "out"
+        src.mkdir()
+        for name in ("msyh.ttc", "seguiemj.ttf"):
+            (src / name).write_bytes(build_font(name))
+        # Even though seguiemj.ttf is in the files list, excludes takes priority.
+        rep = gasp.run_batch(src, out, files=("msyh.ttc", "seguiemj.ttf"),
+                             excludes=("seguiemj.ttf",))
+        names = {r.name for r in rep.results}
+        check("seguiemj.ttf" not in names,
+              "excludes must filter even files listed explicitly")
+
+
 # ---------------------------------------------------------------------------
 # group: byte  (byte-identity against the original toolchain's output)
 #
@@ -366,6 +405,13 @@ def test_exclusions_are_not_whitelisted():
 def test_gasp_excludes_cover_symbol_fonts():
     for name in ("webdings.ttf", "wingding.ttf", "marlett.ttf"):
         check(name in config.GASP_EXCLUDES, f"{name} missing from GASP_EXCLUDES")
+
+
+@test("config")
+def test_gasp_excludes_cover_emoji_fonts():
+    """Emoji fonts carry colour bitmap tables that grid-fitting cannot improve."""
+    for name in ("seguiemj.ttf", "seguisym.ttf", "segmdl2.ttf"):
+        check(name in config.GASP_EXCLUDES, f"emoji font {name} missing from GASP_EXCLUDES")
 
 
 @test("config")

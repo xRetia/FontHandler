@@ -101,7 +101,7 @@ def default_context(settings: Settings | None = None) -> PipelineContext:
 # 1. GaspHack generation
 # ---------------------------------------------------------------------------
 def generate_gasp(ctx: PipelineContext, input_dir: Path | None = None,
-                  output_dir: Path | None = None) -> gasp.BatchReport:
+                   output_dir: Path | None = None) -> gasp.BatchReport:
     """Run the GaspHack engine over the system font directory."""
     input_dir = Path(input_dir or ctx.target_dir)
     output_dir = Path(output_dir or ctx.source_dir)
@@ -119,6 +119,7 @@ def generate_gasp(ctx: PipelineContext, input_dir: Path | None = None,
         input_dir=input_dir,
         output_dir=output_dir,
         files=files,
+        excludes=config.GASP_EXCLUDES,
         token=ctx.token,
         progress=progress,
     )

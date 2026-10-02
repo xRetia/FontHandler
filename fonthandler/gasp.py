@@ -290,13 +290,16 @@ def run_batch(
     input_dir: Path,
     output_dir: Path,
     files: Iterable[str] | None = None,
+    excludes: Iterable[str] | None = None,
     token: CancellationToken | None = None,
     progress: ProgressCb | None = None,
 ) -> BatchReport:
     """Process every ``.ttf``/``.ttc`` found in ``input_dir``.
 
     ``files`` restricts the run to an explicit list of file names (used by the
-    CJK-only mode); ``None`` means "everything in the directory".
+    CJK-only mode); ``None`` means "everything in the directory".  ``excludes``
+    is a list of file names to always skip (emoji/symbol fonts whose glyphs
+    break under grid-fitting); it applies in both modes.
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -306,15 +309,18 @@ def run_batch(
     if not input_dir.is_dir():
         raise NotADirectoryError(str(input_dir))
 
+    excluded = {name.lower() for name in (excludes or ())}
+
     available = {
         p.name.lower(): p
         for p in input_dir.iterdir()
         if p.is_file() and p.suffix.lower() in (".ttf", ".ttc")
+        and p.name.lower() not in excluded
     }
     if files is None:
         candidates = [available[key] for key in sorted(available)]
     else:
-        wanted = {name.lower() for name in files}
+        wanted = {name.lower() for name in files if name.lower() not in excluded}
         candidates = [available[key] for key in sorted(available) if key in wanted]
 
     total = len(candidates)

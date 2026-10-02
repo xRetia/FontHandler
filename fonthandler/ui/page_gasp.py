@@ -125,6 +125,7 @@ class GaspHackPage(BasePage):
             input_dir=target,
             output_dir=source,
             files=files,
+            excludes=config.GASP_EXCLUDES,
             token=handle.token,
             progress=report,
         )

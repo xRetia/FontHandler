@@ -66,10 +66,14 @@ CJK_WHITELIST: tuple[str, ...] = (
 #: Never touched, even though they are CJK -- matching FontReplace.ps1.
 CJK_EXCLUSIONS: tuple[str, ...] = ("simsun.ttc", "simsunb.ttf")
 
-#: Symbol fonts whose glyphs break under grid-fitting; the original batch file
-#: filtered them out of the GaspHack input set.
+#: Symbol/emoji fonts whose glyphs break under grid-fitting; the original batch
+#: file filtered them out of the GaspHack input set.  Emoji fonts carry colour
+#: bitmap (COLR/CPAL or CBDT/CBLC) tables that grid-fitting cannot improve and
+#: that the gasp table does not govern -- patching them is pointless and can
+#: subtly damage emoji rendering.
 GASP_EXCLUDES: tuple[str, ...] = (
     "webdings.ttf", "wingding.ttf", "marlett.ttf", "symbol.ttf",
+    "seguiemj.ttf", "seguisym.ttf", "segmdl2.ttf",
 )
 
 #: NT SERVICE\TrustedInstaller
