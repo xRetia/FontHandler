@@ -2331,11 +2331,62 @@ def test_ui_replace_page_hot_replaces_in_the_sandbox():
 
         _act(win.page_replace, win.page_replace.scan)
         identical = [r for r in range(win.page_replace.table.rowCount())
-                     if win.page_replace.table.item(r, 3).text() == "是"]
+                     if win.page_replace.table.item(r, 4).text() == "是"]
         check_eq(len(identical), len(names), "the scan does not see the fonts as identical")
+        # The new "已替换" column must read the patched state off the target
+        # file itself, so a replaced font is recognisable as such even after
+        # the source gets regenerated.
+        replaced = [r for r in range(win.page_replace.table.rowCount())
+                    if win.page_replace.table.item(r, 3).text() == "是"]
+        check_eq(len(replaced), len(names),
+                 "a hot-replaced font must show as 已替换")
         win.close()
     finally:
         _unguard(saved)
+        sb.cleanup()
+
+
+@test("ui")
+def test_ui_replace_page_marks_queued_and_patched_fonts():
+    """The scan must tell "replaced", "queued for reboot" and "untouched" apart.
+
+    Byte-comparison against the source cannot do that: a font sitting in the
+    reboot queue differs from the source (nothing has landed yet) exactly like
+    an untouched one, and an already-patched target may differ again once the
+    source is regenerated.  The 已替换 column reads the gasp table off the
+    target file and the staged ``.new`` file for the queue state instead.
+    """
+    sb = Sandbox()
+    try:
+        _qapp()
+        names = ["msyi.ttf", "simhei.ttf", "msyh.ttc"]
+        sb.populate(names)
+        win = sb.window()
+
+        # Untouched target, no staged file: 否.
+        _act(win.page_replace, win.page_replace.scan)
+        row = {win.page_replace.table.item(r, 0).text(): r
+               for r in range(win.page_replace.table.rowCount())}
+        check_eq(win.page_replace.table.item(row["simhei.ttf"], 3).text(), "否",
+                 "an untouched font must not claim to be replaced")
+
+        # Staged .new file, target still original: 已排队.
+        (sb.fonts_dir / "msyh.ttc.new").write_bytes(
+            (sb.source_dir / "msyh.ttc").read_bytes())
+        _act(win.page_replace, win.page_replace.scan)
+        check_eq(win.page_replace.table.item(row["msyh.ttc"], 3).text(), "已排队",
+                 "a staged .new file must read as queued for the next boot")
+
+        # Patched target: 是, even when the source bytes differ from it.
+        (sb.fonts_dir / "msyi.ttf").write_bytes(
+            gasp.apply_gasp_hack(build_font("DifferentFamily")))
+        _act(win.page_replace, win.page_replace.scan)
+        check_eq(win.page_replace.table.item(row["msyi.ttf"], 3).text(), "是",
+                 "a patched target must read as replaced")
+        check_eq(win.page_replace.table.item(row["msyi.ttf"], 4).text(), "否",
+                 "a regenerated source still differs byte-wise; that is fine")
+        win.close()
+    finally:
         sb.cleanup()
 
 

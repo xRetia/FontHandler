@@ -136,6 +136,12 @@ class ScanRow:
     source_size: int = 0
     target_size: int = 0
     families: str = ""
+    #: The target file itself already carries the GaspHack table -- replaced,
+    #: whatever the current source file looks like.
+    target_patched: bool = False
+    #: A staged ``<name>.new`` file is waiting in the target directory for the
+    #: next boot to move it into place.
+    queued: bool = False
 
 
 def scan_targets(ctx: PipelineContext) -> list[ScanRow]:
@@ -153,6 +159,9 @@ def scan_targets(ctx: PipelineContext) -> list[ScanRow]:
             present_target=dst.exists(),
             identical=False,
         )
+        # A leftover staged file means the replace was queued for the next
+        # boot: the target on disk is still the old font until then.
+        row.queued = (dst.with_name(dst.name + ".new")).exists()
         if row.present_source:
             row.source_size = src.stat().st_size
             try:
@@ -163,6 +172,14 @@ def scan_targets(ctx: PipelineContext) -> list[ScanRow]:
                 row.families = ""
         if row.present_target:
             row.target_size = dst.stat().st_size
+            # "Is the installed font already patched?" is a different question
+            # from "does it match the current source file byte for byte?" --
+            # regenerating the source later must not make an already-replaced
+            # font read as never-replaced.
+            try:
+                row.target_patched = gasp.has_gasp_hack(dst.read_bytes())
+            except OSError:
+                row.target_patched = False
         if row.present_source and row.present_target:
             try:
                 row.identical = sha256_file(src) == sha256_file(dst)

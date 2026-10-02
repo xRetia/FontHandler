@@ -76,14 +76,14 @@ class ReplacePage(BasePage):
             switches.addWidget(box_widget, index // 2, index % 2)
         olayout.addLayout(switches)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["字体文件", "源存在", "目标存在", "内容一致", "家族名"]
+            ["字体文件", "源存在", "目标存在", "已替换", "内容一致", "家族名"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.body.addWidget(self.table, 1)
 
         self.scan_button = QPushButton("扫描")
@@ -178,13 +178,25 @@ class ReplacePage(BasePage):
         highlight = QColor(COLORS["warn"])
         highlight.setAlpha(48)
         brush = QBrush(highlight)
+        patched_brush = QBrush(QColor(COLORS["ok"]))
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            pending = r.present_source and r.present_target and not r.identical
+            # A font is only "to do" when it is neither patched on disk nor
+            # already staged for the next boot; an already-replaced font must
+            # not stay highlighted even if the source was regenerated since.
+            pending = (r.present_source and r.present_target
+                       and not r.identical and not r.target_patched)
+            if r.target_patched:
+                replaced = "是"
+            elif r.queued:
+                replaced = "已排队"
+            else:
+                replaced = "否"
             cells = [
                 QTableWidgetItem(r.name),
                 QTableWidgetItem("是" if r.present_source else "否"),
                 QTableWidgetItem("是" if r.present_target else "否"),
+                QTableWidgetItem(replaced),
                 QTableWidgetItem("是" if r.identical else "否"),
                 QTableWidgetItem(r.families or "-"),
             ]
@@ -192,6 +204,11 @@ class ReplacePage(BasePage):
                 if pending:
                     cell.setBackground(brush)
                 self.table.setItem(i, col, cell)
+            if r.target_patched:
+                cells[3].setForeground(patched_brush)
+                cells[3].setToolTip("目标字体已带 GaspHack 补丁")
+            elif r.queued:
+                cells[3].setToolTip("补丁字体已排入重启队列，下次开机生效")
 
     def replace(self) -> None:
         self._sync()
