@@ -47,7 +47,11 @@ def _log_crash(exc_type, exc, tb) -> None:
         # Only reuse an existing QApplication. Building one here would need a
         # full event loop and would hang the shutdown path.
         app = QApplication.instance()
-        if app is not None:
+        # And never show one on the offscreen platform: that is a headless
+        # run (CI, test harness), where exec() blocks forever on a dialog
+        # nobody can see or dismiss.  The crash log above is all the
+        # diagnostics such an environment can offer.
+        if app is not None and app.platformName() != "offscreen":
             box = QMessageBox()
             box.setIcon(QMessageBox.Icon.Critical)
             box.setWindowTitle("FontHandler 启动失败")
