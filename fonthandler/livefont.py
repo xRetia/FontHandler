@@ -11,11 +11,41 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
-__all__ = ["add_font_private", "remove_font_private", "installed_fonts", "session_fonts"]
+__all__ = ["add_font_private", "remove_font_private", "installed_fonts",
+           "session_fonts", "broadcast_font_change"]
 
 FR_PRIVATE = 0x10
 
+HWND_BROADCAST = 0xFFFF
+WM_FONTCHANGE = 0x001D
+SMTO_ABORTIFHUNG = 0x0002
+FONTCHANGE_TIMEOUT_MS = 5000
+
 _INSTALLED: dict[str, int] = {}
+
+
+def broadcast_font_change(timeout_ms: int = FONTCHANGE_TIMEOUT_MS) -> bool:
+    """Tell every top-level window that the font set changed (WM_FONTCHANGE).
+
+    Running apps pick the new glyphs up without a log-off.  ``SendMessageTimeout``
+    is deliberate over plain ``SendMessage``: a single hung application must not
+    wedge the replace job; ``SMTO_ABORTIFHUNG`` skips such a window instead.
+
+    The replace pipeline calls this by name after a successful batch -- the
+    function has to exist or the pipeline logs a warning instead of notifying
+    anyone (which is exactly how its absence surfaced in the wild).
+    """
+    if os.name != "nt":
+        return True
+    try:
+        result = ctypes.c_ulong()
+        sent = ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_FONTCHANGE, 0, 0,
+            SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(result),
+        )
+        return bool(sent)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def add_font_private(path: Path) -> bool:

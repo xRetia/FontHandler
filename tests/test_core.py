@@ -2127,6 +2127,77 @@ def test_replace_reports_the_real_last_error():
         pass  # the Z: path resolved; nothing to assert
 
 
+@test("replace")
+def test_font_change_broadcast_exists_and_reaches_every_window():
+    """The pipeline calls ``livefont.broadcast_font_change`` by name.
+
+    The function did not exist, so every replace batch ended with
+    "广播字体变化失败：module 'fonthandler.livefont' has no attribute
+    'broadcast_font_change'" -- the warning everyone saw in the log while the
+    notification silently never reached a single window.
+    """
+    import ctypes
+
+    from fonthandler import livefont
+
+    if os.name != "nt":
+        check(livefont.broadcast_font_change(),
+              "off-Windows the broadcast must be a harmless success")
+        return
+
+    captured: dict = {}
+
+    class FakeUser32:
+        @staticmethod
+        def SendMessageTimeoutW(hwnd, msg, wparam, lparam, flags, timeout, result):
+            captured.update(hwnd=hwnd, msg=msg, flags=flags, timeout=timeout)
+            return 1
+
+    class FakeWindll:
+        user32 = FakeUser32()
+
+    original = ctypes.windll
+    ctypes.windll = FakeWindll()
+    try:
+        check(livefont.broadcast_font_change(),
+              "a delivered broadcast must report success")
+    finally:
+        ctypes.windll = original
+
+    check_eq(captured["hwnd"], 0xFFFF, "must be sent to every top-level window")
+    check_eq(captured["msg"], 0x001D, "the message must be WM_FONTCHANGE")
+    check_eq(captured["flags"] & 0x0002, 0x0002,
+             "SMTO_ABORTIFHUNG is missing: one hung app would wedge the job")
+    check(captured["timeout"] > 0, "the timeout must be finite")
+
+
+@test("replace")
+def test_font_change_broadcast_survives_a_failing_send():
+    """A broadcast failure must return False, not raise into the job."""
+    import ctypes
+
+    from fonthandler import livefont
+
+    if os.name != "nt":
+        return
+
+    class FakeUser32:
+        @staticmethod
+        def SendMessageTimeoutW(*args):
+            return 0
+
+    class FakeWindll:
+        user32 = FakeUser32()
+
+    original = ctypes.windll
+    ctypes.windll = FakeWindll()
+    try:
+        check(not livefont.broadcast_font_change(),
+              "a zero return from SendMessageTimeout must read as failure")
+    finally:
+        ctypes.windll = original
+
+
 @test("ui")
 def test_ui_window_builds_all_five_pages():
     from PyQt6.QtWidgets import QMainWindow
